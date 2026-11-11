@@ -1,0 +1,42 @@
+name: gold-bot
+
+on:
+  schedule:
+    - cron: "*/10 6-17 * * 1-5"   # every 10 min, 06:00-17:59 UTC, Mon-Fri
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Trade signals
+        continue-on-error: true
+        run: python bot.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: News and status
+        continue-on-error: true
+        run: python news.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Save state
+        run: |
+          git config user.name "gold-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json news_state.json || true
+          git diff --cached --quiet || (git commit -m "update state" && git pull --rebase && git push)
