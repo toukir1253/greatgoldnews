@@ -2,7 +2,8 @@ name: gold-bot
 
 on:
   schedule:
-    - cron: "*/10 6-17 * * 1-5"   # trade signals only: 12:00-23:59 Bangladesh time, Mon-Fri
+    - cron: "*/10 23 * * 0-4"   # 05:00-05:59 Bangladesh time, Monday-Friday
+    - cron: "*/10 0-17 * * 1-5" # 06:00-23:59 Bangladesh time, Monday-Friday
   workflow_dispatch:
 
 permissions:
