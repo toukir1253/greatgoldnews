@@ -1,0 +1,35 @@
+name: gold-news-24h
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes, 24 hours, every day (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gold-news-24h
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: News and status
+        run: python news.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Save news state
+        run: |
+          git config user.name "gold-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add news_state.json || true
+          git diff --cached --quiet || (git commit -m "update news state" && git pull --rebase && git push)
