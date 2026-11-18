@@ -1,4 +1,4 @@
-"""Gold signal bot V2.1 — M15 entries with H1 confirmation and conservative tracking."""
+"""Gold signal bot V2.2 — live-entry validation and trade expiry."""
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -14,6 +14,9 @@ MIN_GAP_MINUTES = 45
 MIN_SCORE = 75
 SL_ATR_BUFFER = 0.20
 REWARD_RISK = 2.0
+LIVE_MAX_DRIFT_ATR = 0.25
+LIVE_QUOTE_MAX_AGE_SECONDS = 180
+TRADE_EXPIRY_BARS = 96
 CAL_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 STATE = Path("state.json")
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -201,9 +204,40 @@ def build_signal(m15, h1):
         "rsi": rsi,
         "score": score,
         "risk": risk,
+        "atr": atr,
         "candle": candle_time,
         "time": datetime.now(UTC).isoformat(),
     }
+
+
+def validate_live_entry(candidate):
+    """Fetch a fresh 1-minute quote and reject entries that have drifted."""
+    quote = yf.download(SYMBOL, period="1d", interval="1m", progress=False, auto_adjust=False, threads=False)
+    if quote is None or quote.empty:
+        raise RuntimeError("No live quote; signal blocked")
+    if isinstance(quote.columns, pd.MultiIndex):
+        quote.columns = quote.columns.get_level_values(0)
+    quote = quote.dropna(subset=["Close"])
+    stamp = pd.Timestamp(quote.index[-1])
+    stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+    age = (pd.Timestamp.now(tz="UTC") - stamp).total_seconds()
+    if age < -60 or age > LIVE_QUOTE_MAX_AGE_SECONDS:
+        raise RuntimeError(f"Quote stale: {age:.0f}s")
+    live = float(quote["Close"].iloc[-1])
+    atr = float(candidate["atr"])
+    drift = abs(live - float(candidate["entry"]))
+    if drift > LIVE_MAX_DRIFT_ATR * atr:
+        raise RuntimeError(f"Entry drift {drift:.2f} exceeds ATR limit")
+    stop = float(candidate["sl"])
+    risk = live - stop if candidate["side"] == "BUY" else stop - live
+    if risk <= 0 or risk < 0.6 * atr or risk > 2.5 * atr:
+        raise RuntimeError("Invalid stop distance at live price")
+    candidate["entry"] = live
+    candidate["risk"] = risk
+    candidate["tp"] = live + REWARD_RISK*risk if candidate["side"] == "BUY" else live - REWARD_RISK*risk
+    candidate["quote_time"] = stamp.isoformat()
+    candidate["drift"] = drift
+    return candidate
 
 
 def update_outcomes(state, m15):
@@ -244,6 +278,12 @@ def update_outcomes(state, m15):
                 close_time = candle_time.isoformat() if hasattr(candle_time, "isoformat") else str(candle_time)
                 break
 
+        if not result and len(later) >= TRADE_EXPIRY_BARS:
+            result = "TIMEOUT"
+            expiry_index = later.index[TRADE_EXPIRY_BARS - 1]
+            expiry_bar = later.iloc[TRADE_EXPIRY_BARS - 1]
+            close_time = expiry_index.isoformat() if hasattr(expiry_index, "isoformat") else str(expiry_index)
+            trade["expiry_close"] = float(expiry_bar["Close"])
         if result:
             trade["result"] = result
             trade["closed"] = close_time
@@ -324,16 +364,23 @@ def main():
     if high_impact_news_blackout(now):
         save_state(state)
         return
+    try:
+        candidate = validate_live_entry(candidate)
+    except Exception as exc:
+        print(f"Live-entry validation blocked signal: {exc}")
+        save_state(state)
+        return
 
     number = state["count"] + 1
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.1\n"
-        f"Entry: {candidate['entry']:.2f}\n"
+        f"🥇 GOLD {candidate['side']} — V2.2\n"
+        f"Entry: {candidate['entry']:.2f} (live quote)\n"
         f"Stop Loss: {candidate['sl']:.2f}\n"
         f"Take Profit: {candidate['tp']:.2f}\n"
         f"Risk/Reward: 1:{REWARD_RISK:.1f}\n"
         f"Setup score: {candidate['score']}/100 | RSI: {candidate['rsi']:.1f}\n"
-        f"টাইমফ্রেম: M15 entry + H1 trend\n"
+        f"Live quote: {candidate['quote_time']} | Drift: {candidate['drift']:.2f}\n"
+        f"টাইমফ্রেম: M15 entry + H1 trend | Drift limit: {LIVE_MAX_DRIFT_ATR:.2f} ATR\n"
         f"আজকের সিগন্যাল: {number}/{MAX_SIGNALS} | বাংলাদেশ সময়\n\n"
         "ডেটা: Yahoo GC=F gold-futures proxy, spot XAU/USD নয়। "
         "স্কোর জয়ের সম্ভাবনা নয়; আগে demo-তে যাচাই করো।"
