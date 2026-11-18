@@ -17,7 +17,9 @@ REWARD_RISK = 2.0
 LIVE_MAX_DRIFT_ATR = 0.25
 LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TRADE_EXPIRY_BARS = 96
-CAL_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
+CALENDAR_CACHE = Path("calendar_cache.json")
+CALENDAR_MAX_AGE_HOURS = 36
 STATE = Path("state.json")
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -51,6 +53,7 @@ def load_state():
         "open": raw.get("open", []),
         "history": raw.get("history", []),
         "summary": raw.get("summary", ""),
+        "pending_report": raw.get("pending_report", None),
     }
 
 
@@ -89,33 +92,50 @@ def market_data(interval, period):
 
 
 def high_impact_news_blackout(now):
-    """Fail closed if the calendar is unavailable; avoid major USD-news windows."""
-    try:
-        response = requests.get(
-            CAL_URL, timeout=15, headers={"User-Agent": "Mozilla/5.0"}
-        )
-        response.raise_for_status()
-        events = response.json()
-    except Exception as exc:
-        print(f"Calendar unavailable; signal blocked for safety: {exc}")
-        return True
-
+    """Try primary/backup feeds, then recent cached calendar; outage won't block whole day."""
+    events, source, errors = None, "live", []
+    for url in CAL_URLS:
+        try:
+            response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            events = response.json()
+            if not isinstance(events, list):
+                raise ValueError("Calendar response is not a list")
+            CALENDAR_CACHE.write_text(json.dumps({"fetched_at": now.isoformat(), "events": events}, ensure_ascii=False), encoding="utf-8")
+            break
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    if events is None:
+        source = "cache"
+        try:
+            cached = json.loads(CALENDAR_CACHE.read_text(encoding="utf-8"))
+            fetched = datetime.fromisoformat(cached["fetched_at"])
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=UTC)
+            age = (now - fetched.astimezone(UTC)).total_seconds()
+            if 0 <= age <= CALENDAR_MAX_AGE_HOURS * 3600 and isinstance(cached.get("events"), list):
+                events = cached["events"]
+                print(f"Using cached calendar ({age / 3600:.1f}h old)")
+        except Exception as exc:
+            errors.append(f"cache: {exc}")
+    if events is None:
+        print("WARNING: calendar unavailable; blackout cannot be verified; not blanket-blocking signals.")
+        print("Calendar errors:", " | ".join(errors))
+        return False, "unavailable"
     for event in events:
         if event.get("country") != "USD" or event.get("impact") != "High":
             continue
         try:
-            event_time = datetime.fromisoformat(
-                event["date"].replace("Z", "+00:00")
-            )
+            event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
             if event_time.tzinfo is None:
                 event_time = event_time.replace(tzinfo=UTC)
             minutes = (event_time - now).total_seconds() / 60
             if -15 <= minutes <= 30:
                 print("High-impact news blackout:", event.get("title", "USD event"))
-                return True
+                return True, source
         except (KeyError, TypeError, ValueError):
             continue
-    return False
+    return False, source
 
 
 def build_signal(m15, h1):
@@ -306,7 +326,7 @@ def is_today_bd(iso_time, today):
         return False
 
 
-def send_daily_report(state, today):
+def send_daily_report(state, today, signal_count=None):
     trades = [t for t in state["history"] if is_today_bd(t.get("time", ""), today)]
     wins = sum(t.get("result") == "WIN" for t in trades)
     losses = sum(t.get("result") == "LOSS" for t in trades)
@@ -314,7 +334,7 @@ def send_daily_report(state, today):
     timeouts = sum(t.get("result") == "TIMEOUT" for t in trades)
     message = (
         f"📊 GOLD দৈনিক রিপোর্ট — {today}\n"
-        f"সিগন্যাল: {state['count']}/{MAX_SIGNALS}\n"
+        f"সিগন্যাল: {state['count'] if signal_count is None else signal_count}/{MAX_SIGNALS}\n"
         f"বন্ধ ট্রেড: {len(trades)} | WIN: {wins} | LOSS: {losses} | Timeout: {timeouts} | Ambiguous: {ambiguous}\n"
         f"চলমান: {len(state['open'])}\n"
         "ফলাফল candle-based আনুমানিক হিসাব; broker execution, spread বা slippage অন্তর্ভুক্ত নয়।"
@@ -329,6 +349,8 @@ def main():
     state = load_state()
 
     if state["date"] != today:
+        if state["date"] and state["summary"] != state["date"]:
+            state["pending_report"] = {"date": state["date"], "count": state["count"]}
         state["date"] = today
         state["count"] = 0
 
@@ -336,9 +358,14 @@ def main():
     h1 = market_data("1h", "1mo")
     update_outcomes(state, m15)
 
-    # One daily report, close to midnight Bangladesh time.
-    if bd_now.weekday() < 5 and bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:
-        send_daily_report(state, today)
+    # Recover a missed report on the next successful run, including after midnight.
+    pending = state.get("pending_report")
+    if pending:
+        send_daily_report(state, pending["date"], pending["count"])
+        state["summary"] = pending["date"]
+        state["pending_report"] = None
+    elif bd_now.weekday() < 5 and bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:
+        send_daily_report(state, today, state["count"])
         state["summary"] = today
 
     # Gold market is normally closed on weekends; schedule covers weekdays.
@@ -363,7 +390,8 @@ def main():
         save_state(state)
         print("Duplicate M15 candle skipped.")
         return
-    if high_impact_news_blackout(now):
+    blackout, calendar_source = high_impact_news_blackout(now)
+    if blackout:
         save_state(state)
         return
     try:
@@ -383,9 +411,10 @@ def main():
         f"Setup score: {candidate['score']}/100 | RSI: {candidate['rsi']:.1f}\n"
         f"Live quote: {candidate['quote_time']} | Drift: {candidate['drift']:.2f}\n"
         f"টাইমফ্রেম: M15 entry + H1 trend | Drift limit: {LIVE_MAX_DRIFT_ATR:.2f} ATR\n"
-        f"আজকের সিগন্যাল: {number}/{MAX_SIGNALS} | বাংলাদেশ সময়\n\n"
+        f"আজকের সিগন্যাল: {number}/{MAX_SIGNALS} | বাংলাদেশ সময়\n"
+        f"News calendar: {calendar_source}\n\n"
         "ডেটা: Yahoo GC=F gold-futures proxy, spot XAU/USD নয়। "
-        "স্কোর জয়ের সম্ভাবনা নয়; আগে demo-তে যাচাই করো।"
+        "স্কোর জয়ের সম্ভাবনা নয়; আগে demo-তে যাচাই করো।" + ("\n⚠️ ক্যালেন্ডার অনুপলব্ধ: নিউজ ব্ল্যাকআউট যাচাই করা যায়নি।" if calendar_source == "unavailable" else "")
     )
     send(message)  # Persist count only after Telegram confirms delivery.
     state["count"] = number
