@@ -155,16 +155,23 @@ def market_status():
     if isinstance(daily.columns, pd.MultiIndex):
         daily.columns = daily.columns.get_level_values(0)
     daily_close = daily["Close"].dropna()
-    price = float(close.iloc[-1])
+    completed = -2
+    candle_time = pd.Timestamp(frame.index[completed])
+    candle_time = candle_time.tz_localize("UTC") if candle_time.tzinfo is None else candle_time.tz_convert("UTC")
+    candle_age = (pd.Timestamp.now(tz="UTC") - candle_time).total_seconds()
+    if candle_age > 1800 or candle_age < -60:
+        raise RuntimeError(f"Completed M15 candle stale: {candle_age:.0f}s")
+    price = float(close.iloc[completed])
     previous_close = float(daily_close.iloc[-2]) if len(daily_close) >= 2 else float("nan")
     change = (price / previous_close - 1) * 100 if pd.notna(previous_close) else 0.0
-    rsi = float(rsi_series.iloc[-1])
-    trend = "ঊর্ধ্বমুখী 📈" if ema20.iloc[-1] > ema50.iloc[-1] else "নিম্নমুখী 📉"
+    rsi = float(rsi_series.iloc[completed])
+    trend = "ঊর্ধ্বমুখী 📈" if ema20.iloc[completed] > ema50.iloc[completed] else "নিম্নমুখী 📉"
     condition = "Overbought" if rsi >= 70 else "Oversold" if rsi <= 30 else "Neutral"
     return (
         f"🥇 GOLD MARKET STATUS\nদাম: {price:.2f} ({change:+.2f}% daily)\n"
         f"M15 trend: {trend}\nRSI: {rsi:.1f} ({condition})\n"
-        "দাম Yahoo GC=F futures proxy; spot XAU/USD নয়।"
+        f"শেষ সম্পূর্ণ M15 candle: {candle_time.isoformat()}\n"
+        "দাম Yahoo GC=F futures proxy; spot XAU/USD নয়; delayed হতে পারে।"
     )
 
 
