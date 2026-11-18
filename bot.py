@@ -168,8 +168,15 @@ def build_signal(m15, h1):
     if side is None:
         return None
 
-    # Transparent checklist score; this is a setup-quality filter, not win probability.
-    score = 25 + 20 + 15 + 20 + 20
+    # Setup-quality score (not a probability of winning).
+    pullback_distance = abs(float(previous["Low"] if side == "BUY" else previous["High"]) - float(previous["ema20"]))
+    pullback_points = 20 if pullback_distance <= 0.10 * atr else 15
+    momentum_points = 15 if (54 <= rsi <= 64 if side == "BUY" else 36 <= rsi <= 46) else 10
+    candle_body = abs(float(current["Close"]) - float(current["Open"]))
+    candle_points = 20 if candle_body >= 0.50 * atr else 14
+    available_room = buy_room if side == "BUY" else sell_room
+    room_points = 20 if available_room >= 3.0 * atr else 15
+    score = 25 + pullback_points + momentum_points + candle_points + room_points
     if score < MIN_SCORE:
         return None
 
