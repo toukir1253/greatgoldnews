@@ -278,10 +278,11 @@ def update_outcomes(state, m15):
                 close_time = candle_time.isoformat() if hasattr(candle_time, "isoformat") else str(candle_time)
                 break
 
-        if not result and len(later) >= TRADE_EXPIRY_BARS:
+        completed_later = later.iloc[:-1]
+        if not result and len(completed_later) >= TRADE_EXPIRY_BARS:
             result = "TIMEOUT"
-            expiry_index = later.index[TRADE_EXPIRY_BARS - 1]
-            expiry_bar = later.iloc[TRADE_EXPIRY_BARS - 1]
+            expiry_index = completed_later.index[TRADE_EXPIRY_BARS - 1]
+            expiry_bar = completed_later.iloc[TRADE_EXPIRY_BARS - 1]
             close_time = expiry_index.isoformat() if hasattr(expiry_index, "isoformat") else str(expiry_index)
             trade["expiry_close"] = float(expiry_bar["Close"])
         if result:
@@ -310,10 +311,11 @@ def send_daily_report(state, today):
     wins = sum(t.get("result") == "WIN" for t in trades)
     losses = sum(t.get("result") == "LOSS" for t in trades)
     ambiguous = sum(t.get("result") == "AMBIGUOUS" for t in trades)
+    timeouts = sum(t.get("result") == "TIMEOUT" for t in trades)
     message = (
         f"📊 GOLD দৈনিক রিপোর্ট — {today}\n"
         f"সিগন্যাল: {state['count']}/{MAX_SIGNALS}\n"
-        f"বন্ধ ট্রেড: {len(trades)} | WIN: {wins} | LOSS: {losses} | Ambiguous: {ambiguous}\n"
+        f"বন্ধ ট্রেড: {len(trades)} | WIN: {wins} | LOSS: {losses} | Timeout: {timeouts} | Ambiguous: {ambiguous}\n"
         f"চলমান: {len(state['open'])}\n"
         "ফলাফল candle-based আনুমানিক হিসাব; broker execution, spread বা slippage অন্তর্ভুক্ত নয়।"
     )
