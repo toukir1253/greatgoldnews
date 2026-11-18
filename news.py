@@ -18,7 +18,8 @@ WARN_MINUTES = 60
 STATUS_EVERY_MIN = 30
 MAX_HEADLINES = 3
 STATE_FILE = Path("news_state.json")
-CAL_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
+CALENDAR_CACHE = Path("calendar_cache.json")
 NEWS_URL = (
     "https://news.google.com/rss/search?q=gold+price+OR+XAUUSD+OR+%22gold+futures%22"
     "+when:1d&hl=en-US&gl=US&ceid=US:en"
@@ -46,12 +47,32 @@ def bd_time(value):
 
 def get_calendar_alerts(state, now):
     alerts = []
-    try:
-        response = requests.get(CAL_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        response.raise_for_status()
-        events = response.json()
-    except Exception as exc:
-        print("Calendar fetch failed:", exc)
+    events = None
+    for url in CAL_URLS:
+        try:
+            response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            events = response.json()
+            if not isinstance(events, list):
+                raise ValueError("Calendar response is not a list")
+            CALENDAR_CACHE.write_text(json.dumps({"fetched_at": now.isoformat(), "events": events}, ensure_ascii=False), encoding="utf-8")
+            break
+        except Exception as exc:
+            print(f"Calendar feed failed ({url}): {exc}")
+    if events is None:
+        try:
+            cached = json.loads(CALENDAR_CACHE.read_text(encoding="utf-8"))
+            fetched = datetime.fromisoformat(cached["fetched_at"])
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=UTC)
+            age = (now - fetched.astimezone(UTC)).total_seconds()
+            if 0 <= age <= 36 * 3600 and isinstance(cached.get("events"), list):
+                events = cached["events"]
+                print(f"Using cached calendar ({age / 3600:.1f}h old)")
+        except Exception as exc:
+            print("Calendar cache unavailable:", exc)
+    if events is None:
+        print("Calendar unavailable; no calendar alerts this run.")
         return alerts
 
     for event in events:
