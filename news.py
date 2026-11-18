@@ -1,6 +1,8 @@
 """Gold news and market-status alerts for Telegram."""
 import hashlib
+import html
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -109,6 +111,40 @@ def get_calendar_alerts(state, now):
     return alerts
 
 
+
+def translate_to_bengali(text):
+    """Translate a headline/snippet to Bengali; preserve original if translation is unavailable."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        response = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "bn", "dt": "t", "q": text[:900]},
+            timeout=12,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+        parts = response.json()[0]
+        translated = "".join(part[0] for part in parts if part and part[0])
+        return translated.strip() or text
+    except Exception as exc:
+        print("Bengali translation unavailable; using source text:", exc)
+        return text
+
+
+def likely_gold_impact(text):
+    """A cautious keyword-based hint, not a trading signal."""
+    value = (text or "").lower()
+    if any(k in value for k in ("inflation", "cpi", "ppi", "jobs report", "payroll", "employment", "fed rate", "interest rate", "rate cut", "rate hike", "federal reserve")):
+        return "ডলার ও সুদের হারের প্রত্যাশা বদলাতে পারে; দিক নিশ্চিত নয়—দাম ও প্রতিক্রিয়া যাচাই করো।"
+    if any(k in value for k in ("war", "conflict", "attack", "geopolitical", "sanction", "ceasefire")):
+        return "নিরাপদ বিনিয়োগের চাহিদা বাড়লে সোনায় ঊর্ধ্বচাপ আসতে পারে; নিশ্চিত নয়।"
+    if any(k in value for k in ("central bank", "gold buying", "gold demand", "gold reserve", "etf")):
+        return "কেন্দ্রীয় ব্যাংক/বিনিয়োগকারীর চাহিদার তথ্য সোনার দামে প্রভাব ফেলতে পারে; দিক যাচাইসাপেক্ষ।"
+    return "প্রভাবের দিক নিশ্চিত নয়; খবরের পর XAUUSD-এর মূল্যপ্রতিক্রিয়া দেখে সিদ্ধান্ত নাও।"
+
+
 def get_headline_alerts(state, now):
     alerts = []
     try:
@@ -138,11 +174,21 @@ def get_headline_alerts(state, now):
             published = now
         age = now - published.astimezone(UTC)
         if not first_run and timedelta(0) <= age <= timedelta(minutes=45):
-            fresh.append((title, link))
+            fresh.append((title, link, item.findtext('description') or ''))
 
     state["seen"] = state["seen"][-500:]
-    for title, link in fresh[:MAX_HEADLINES]:
-        alerts.append(f"📰 {title}\n{link}")
+    for title, link, description in fresh[:MAX_HEADLINES]:
+        bn_title = translate_to_bengali(title)
+        clean_description = re.sub(r"<[^>]+>", " ", html.unescape(description or ""))
+        clean_description = re.sub(r"\\s+", " ", clean_description).strip()
+        bn_summary = translate_to_bengali(clean_description[:700]) if clean_description else ""
+        impact = likely_gold_impact(title + " " + clean_description)
+        message = f"📰 **বিশ্ববাজারের খবর**\\n{bn_title}"
+        if bn_summary:
+            message += f"\\n\\n📝 **বাংলা সারাংশ:**\\n{bn_summary}"
+        message += f"\\n\\n🥇 **XAUUSD-এর সম্ভাব্য প্রভাব:** {impact}"
+        message += f"\\n\\n🔗 **মূল খবর:** {link}"
+        alerts.append(message)
     return alerts
 
 
