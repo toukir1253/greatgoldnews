@@ -33,6 +33,7 @@ jobs:
           git config user.name "gold-bot"
           git config user.email "bot@users.noreply.github.com"
           git add state.json
+          if [ -f calendar_cache.json ]; then git add calendar_cache.json; fi
           git diff --cached --quiet || (git commit -m "update V2.2 signal state" && git pull --rebase && git push)
       - name: Telegram failure alert
         if: failure()
