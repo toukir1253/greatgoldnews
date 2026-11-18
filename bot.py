@@ -1,13 +1,13 @@
 """Gold (XAU/USD) signal bot -> Telegram.
 
-Max 3 signals per UTC day, only inside the chosen trading session.
+Maximum 5 signals per Bangladesh calendar day, only inside 05:00-23:59 Bangladesh time.
 Strategy: EMA20/EMA50 trend + pullback to EMA20 + RSI filter, ATR-based SL/TP.
 This is an alert tool, NOT financial advice and NOT a guarantee of profit.
 """
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -17,9 +17,7 @@ import yfinance as yf
 # ---------- Settings (change these) ----------
 SYMBOL = "GC=F"            # Gold futures (free data). XAU/USD spot is very close.
 INTERVAL = "15m"
-SESSION_START_UTC = 7      # London open ~07:00 UTC
-SESSION_END_UTC = 17       # NY session end ~17:00 UTC
-MAX_SIGNALS_PER_DAY = 3
+MAX_SIGNALS_PER_DAY = 5
 MIN_GAP_MINUTES = 60       # minimum gap between two signals
 SL_ATR = 1.5               # stop loss = 1.5 x ATR
 TP_ATR = 3.0               # take profit = 3.0 x ATR (risk:reward 1:2)
@@ -28,6 +26,7 @@ STATE_FILE = Path("state.json")
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+BD_TZ = timezone(timedelta(hours=6))
 
 
 def load_state():
@@ -93,15 +92,18 @@ def find_signal(df):
 
 def main():
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        print("Weekend, market closed.")
+    bd_now = now.astimezone(BD_TZ)
+
+    # Bangladesh trading days: Monday-Friday, 05:00 until midnight.
+    if bd_now.weekday() >= 5:
+        print("Weekend in Bangladesh, market closed.")
         return
-    if not (SESSION_START_UTC <= now.hour < SESSION_END_UTC):
-        print("Outside session.")
+    if not (5 <= bd_now.hour < 24):
+        print("Outside Bangladesh signal session (05:00-23:59).")
         return
 
     state = load_state()
-    today = now.strftime("%Y-%m-%d")
+    today = bd_now.strftime("%Y-%m-%d")
     if state["date"] != today:
         state = {"date": today, "count": 0, "last_ts": ""}
     if state["count"] >= MAX_SIGNALS_PER_DAY:
@@ -138,7 +140,7 @@ def main():
         f"Stop Loss: {sl:.2f}\n"
         f"Take Profit: {tp:.2f}\n"
         f"RSI: {row['rsi']:.0f} | Timeframe: {INTERVAL}\n"
-        f"Signal {state['count']}/{MAX_SIGNALS_PER_DAY} today\n\n"
+        f"Signal {state['count']}/{MAX_SIGNALS_PER_DAY} today (Bangladesh time)\n\n"
         f"⚠️ কোনো সিগন্যালই নিশ্চিত নয়। ঝুঁকি নিয়ন্ত্রণে রাখুন: প্রতি ট্রেডে ব্যালেন্সের ১-২% এর বেশি নয়।"
     )
     send_telegram(msg)
