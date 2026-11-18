@@ -23,7 +23,7 @@ from bot import INTERVAL, SYMBOL, indicators, send_telegram
 IMPACTS = {"High"}            # add "Medium" for more events
 CURRENCIES = {"USD"}          # USD news moves gold the most
 WARN_MINUTES = 60             # advance warning time
-STATUS_EVERY_MIN = 30         # status when there is no news (set 10 for every run)
+STATUS_EVERY_MIN = 30         # status when there is no news
 MAX_HEADLINES = 3
 STATE_FILE = Path("news_state.json")
 CAL_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -130,9 +130,6 @@ def gold_status():
 
 def main():
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        print("Weekend.")
-        return
     state = load_state()
     parts = calendar_alerts(state, now) + headline_alerts(state, now)
 
