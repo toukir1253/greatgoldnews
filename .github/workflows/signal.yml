@@ -1,18 +1,14 @@
 name: gold-bot
-
 on:
   schedule:
-    - cron: "*/10 23 * * 0-4"   # 05:00-05:59 Bangladesh time, Monday-Friday
-    - cron: "*/10 0-17 * * 1-5" # 06:00-23:59 Bangladesh time, Monday-Friday
+    - cron: "*/10 23 * * 0-4"
+    - cron: "*/10 0-17 * * 1-5"
   workflow_dispatch:
-
 permissions:
   contents: write
-
 concurrency:
-  group: gold-bot
+  group: gold-bot-state
   cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -23,15 +19,28 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Trade signals
-        continue-on-error: true
+      - name: Run V2 trade signals
+        id: bot
         run: python bot.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - name: Save state
+        if: always() && steps.bot.outcome == 'success'
         run: |
           git config user.name "gold-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add state.json || true
-          git diff --cached --quiet || (git commit -m "update trade state" && git pull --rebase && git push)
+          git add state.json
+          git diff --cached --quiet || (git commit -m "update V2 trade state" && git pull --rebase && git push)
+      - name: Notify Telegram about workflow failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, requests
+          t,c=os.getenv("TELEGRAM_TOKEN"),os.getenv("TELEGRAM_CHAT_ID")
+          if t and c:
+              requests.post(f"https://api.telegram.org/bot{t}/sendMessage",data={"chat_id":c,"text":"⚠️ Gold Bot V2 failed. GitHub Actions run log দেখুন।"},timeout=20).raise_for_status()
+          PY
