@@ -37,7 +37,7 @@ def data(interval,period):
 def news_block(now):
     try: events=requests.get(CAL_URL,timeout=15,headers={"User-Agent":"Mozilla/5.0"}).json()
     except Exception as e:
-        print("Calendar unavailable; trading filter skipped:",e); return False
+        print("Calendar unavailable; block signals for safety:",e); return True
     for e in events:
         if e.get("country")!="USD" or e.get("impact")!="High": continue
         try:
@@ -66,15 +66,24 @@ def signal(m,h):
 
 def outcomes(s,m):
     if len(m)<2:return
-    b=m.iloc[-2]; stamp=b.name.isoformat() if hasattr(b.name,"isoformat") else str(b.name); keep=[]
-    for t in s["open"]:
-        if t.get("checked")==stamp: keep.append(t); continue
-        hi,lo=float(b.High),float(b.Low)
-        sl,tp=(lo<=t["sl"],hi>=t["tp"]) if t["side"]=="BUY" else (hi>=t["sl"],lo<=t["tp"])
-        result="AMBIGUOUS" if sl and tp else "LOSS" if sl else "WIN" if tp else ""
-        if result: t["result"]=result; t["closed"]=stamp; s["history"].append(t)
-        else: t["checked"]=stamp; keep.append(t)
+    keep=[]
+    for trade in s["open"]:
+        entry_idx=m.index.get_indexer([pd.Timestamp(trade["candle"])],method="nearest")[0]
+        closed=False
+        for idx in range(max(0,entry_idx+1),len(m)-1):
+            bar=m.iloc[idx]; hi,lo=float(bar.High),float(bar.Low)
+            sl,tp=(lo<=trade["sl"],hi>=trade["tp"]) if trade["side"]=="BUY" else (hi>=trade["sl"],lo<=trade["tp"])
+            result="AMBIGUOUS" if sl and tp else "LOSS" if sl else "WIN" if tp else ""
+            if result:
+                trade["result"]=result
+                trade["closed"]=m.index[idx].isoformat() if hasattr(m.index[idx],"isoformat") else str(m.index[idx])
+                s["history"].append(trade); closed=True; break
+        if not closed: keep.append(trade)
     s["open"]=keep; s["history"]=s["history"][-200:]
+
+def is_today_bd(iso_time,today):
+    try:return datetime.fromisoformat(iso_time).astimezone(BD).strftime("%Y-%m-%d")==today
+    except Exception:return False
 
 def main():
     now=datetime.now(UTC); bd=now.astimezone(BD); today=bd.strftime("%Y-%m-%d"); s=load()
@@ -83,7 +92,7 @@ def main():
     if len(m)<60 or len(h)<60: raise RuntimeError("Insufficient market data")
     outcomes(s,m)
     if bd.weekday()<5 and bd.hour==23 and bd.minute>=50 and s["summary"]!=today:
-        hist=[t for t in s["history"] if t.get("time","").startswith(today)]
+        hist=[t for t in s["history"] if is_today_bd(t.get("time",""),today)]
         send(f"📊 GOLD দৈনিক রিপোর্ট {today}\nSignals: {s['count']}/{MAX_SIGNALS}\nClosed: {len(hist)} | WIN: {sum(t.get('result')=='WIN' for t in hist)} | LOSS: {sum(t.get('result')=='LOSS' for t in hist)} | Ambiguous: {sum(t.get('result')=='AMBIGUOUS' for t in hist)}\nOpen: {len(s['open'])}\nএটি কেবল candle-based আনুমানিক ফলাফল, broker execution নয়।")
         s["summary"]=today
     if bd.weekday()>=5 or not 5<=bd.hour<24 or s["count"]>=MAX_SIGNALS: save(s); return
