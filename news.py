@@ -21,7 +21,7 @@ STATUS_EVERY_MIN = 30
 MAX_HEADLINES = 3
 STATE_FILE = Path("news_state.json")
 CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
-CALENDAR_CACHE = Path("calendar_cache.json")
+CALENDAR_CACHE = Path("news_calendar_cache.json")  # separate from signal bot cache
 NEWS_URL = (
     "https://news.google.com/rss/search?q=gold+price+OR+XAUUSD+OR+%22gold+futures%22"
     "+when:1d&hl=en-US&gl=US&ceid=US:en"
@@ -162,6 +162,11 @@ def get_headline_alerts(state, now):
         link = (item.findtext("link") or "").strip()
         if not title:
             continue
+        lower_title = title.lower()
+        relevant_terms = ("gold", "xau", "bullion", "precious metal", "federal reserve", "fed", "interest rate", "inflation", "cpi", "ppi", "payroll", "jobs report", "employment", "treasury yield", "dollar", "central bank")
+        irrelevant_terms = ("gold coin", "commemorative coin", "coin collection", "golden boot", "golden globes", "jewelry design")
+        if any(term in lower_title for term in irrelevant_terms) or not any(term in lower_title for term in relevant_terms):
+            continue
         headline_id = hashlib.sha256(title.encode()).hexdigest()[:16]
         if headline_id in state["seen"]:
             continue
@@ -180,14 +185,14 @@ def get_headline_alerts(state, now):
     for title, link, description in fresh[:MAX_HEADLINES]:
         bn_title = translate_to_bengali(title)
         clean_description = re.sub(r"<[^>]+>", " ", html.unescape(description or ""))
-        clean_description = re.sub(r"\\s+", " ", clean_description).strip()
+        clean_description = re.sub(r"\s+", " ", clean_description).strip()
         bn_summary = translate_to_bengali(clean_description[:700]) if clean_description else ""
         impact = likely_gold_impact(title + " " + clean_description)
-        message = f"📰 **বিশ্ববাজারের খবর**\\n{bn_title}"
+        message = f"📰 সোনার বাজারের খবর\n{bn_title}"
         if bn_summary:
-            message += f"\\n\\n📝 **বাংলা সারাংশ:**\\n{bn_summary}"
-        message += f"\\n\\n🥇 **XAUUSD-এর সম্ভাব্য প্রভাব:** {impact}"
-        message += f"\\n\\n🔗 **মূল খবর:** {link}"
+            message += f"\n\n📝 সহজ বাংলা অনুবাদ:\n{bn_summary}"
+        message += f"\n\n🥇 সোনার দামে সম্ভাব্য প্রভাব: {impact}"
+        message += f"\n\n🔗 মূল খবর: {link}"
         alerts.append(message)
     return alerts
 
