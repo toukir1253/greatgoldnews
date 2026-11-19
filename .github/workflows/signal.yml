@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: gold-signal-state
+  group: gold-bot-shared-state
   cancel-in-progress: false
 jobs:
   run:
@@ -21,7 +21,7 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run V2.2 signal engine
+      - name: Run V2.3 signal engine
         id: bot
         run: python bot.py
         env:
@@ -34,7 +34,7 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add state.json
           if [ -f calendar_cache.json ]; then git add calendar_cache.json; fi
-          git diff --cached --quiet || (git commit -m "update V2.2 signal state" && git pull --rebase && git push)
+          git diff --cached --quiet || (git commit -m "update V2.3 signal state" && git pull --rebase && git push)
       - name: Telegram failure alert
         if: failure()
         env:
@@ -47,7 +47,7 @@ jobs:
           if token and chat:
               response = requests.post(
                   f"https://api.telegram.org/bot{token}/sendMessage",
-                  data={"chat_id": chat, "text": "⚠️ Gold Signal Bot V2.2 failed. GitHub Actions log দেখুন।"},
+                  data={"chat_id": chat, "text": "⚠️ Gold Signal Bot V2.3 failed. GitHub Actions log দেখুন।"},
                   timeout=20,
               )
               response.raise_for_status()
