@@ -11,7 +11,7 @@ import yfinance as yf
 SYMBOL = "GC=F"  # Yahoo gold-futures proxy; not broker spot XAU/USD
 MAX_SIGNALS = 5
 MIN_GAP_MINUTES = 45
-MIN_SCORE = 75
+MIN_SCORE = 85  # meaningful filter: reject the weakest qualifying setups
 SL_ATR_BUFFER = 0.20
 REWARD_RISK = 2.0
 LIVE_MAX_DRIFT_ATR = 0.25
@@ -343,7 +343,7 @@ def is_today_bd(iso_time, today):
 
 
 def send_daily_report(state, today, signal_count=None):
-    trades = [t for t in state["history"] if is_today_bd(t.get("time", ""), today)]
+    trades = [t for t in state["history"] if is_today_bd(t.get("closed") or t.get("time", ""), today)]
     wins = sum(t.get("result") == "WIN" for t in trades)
     losses = sum(t.get("result") == "LOSS" for t in trades)
     ambiguous = sum(t.get("result") == "AMBIGUOUS" for t in trades)
