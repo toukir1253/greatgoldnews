@@ -89,9 +89,9 @@ def get_calendar_alerts(state, now):
             ).hexdigest()[:16]
             minutes = (event_time - now).total_seconds() / 60
             details = (
-                f"{event.get('country', 'USD')} {event.get('title', 'Economic event')}\n"
+                f"খবর: {translate_to_bengali(event.get('title', 'গুরুত্বপূর্ণ মার্কিন অর্থনৈতিক তথ্য'))}\n"
                 f"সময়: {bd_time(event_time)} (বাংলাদেশ)\n"
-                f"Forecast: {event.get('forecast') or '-'} | Previous: {event.get('previous') or '-'}"
+                f"সম্ভাব্য ফল: {event.get('forecast') or 'তথ্য নেই'} | আগের ফল: {event.get('previous') or 'তথ্য নেই'}"
             )
             if 0 < minutes <= WARN_MINUTES and event_id not in state["pre"]:
                 state["pre"].append(event_id)
@@ -238,7 +238,7 @@ def market_status():
     change = (price / previous_close - 1) * 100 if pd.notna(previous_close) else 0.0
     rsi = float(rsi_series.iloc[completed])
     trend = "ঊর্ধ্বমুখী 📈" if ema20.iloc[completed] > ema50.iloc[completed] else "নিম্নমুখী 📉"
-    condition = "Overbought" if rsi >= 70 else "Oversold" if rsi <= 30 else "Neutral"
+    condition = "দাম অতিরিক্ত বেড়েছে" if rsi >= 70 else "দাম অতিরিক্ত নেমেছে" if rsi <= 30 else "স্বাভাবিক অবস্থায়"
     return (
         f"🥇 GOLD MARKET STATUS\nদাম: {price:.2f} ({change:+.2f}% daily)\n"
         f"M15 trend: {trend}\nRSI: {rsi:.1f} ({condition})\n"
