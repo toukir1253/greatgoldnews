@@ -1,4 +1,4 @@
-"""Gold signal bot V2.2 — live-entry validation and trade expiry."""
+"""Gold signal bot V2.3 — V2.2 plus candle lookback, skip reasons and point distances."""
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -17,6 +17,7 @@ REWARD_RISK = 2.0
 LIVE_MAX_DRIFT_ATR = 0.25
 LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TRADE_EXPIRY_BARS = 96
+LOOKBACK_CANDLES = 4  # V2.3: also check the last 4 closed M15 candles (~60 min)
 CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
 CALENDAR_CACHE = Path("calendar_cache.json")
 CALENDAR_MAX_AGE_HOURS = 36
@@ -50,6 +51,7 @@ def load_state():
         "count": int(raw.get("count", 0)),
         "last_ts": raw.get("last_ts", ""),
         "last_candle": raw.get("last_candle", ""),
+        "seen_candles": raw.get("seen_candles", []),  # V2.3: candles already alerted
         "open": raw.get("open", []),
         "history": raw.get("history", []),
         "summary": raw.get("summary", ""),
@@ -138,22 +140,32 @@ def high_impact_news_blackout(now):
     return False, source
 
 
-def build_signal(m15, h1):
-    """Use only completed candles; require trend, pullback, momentum and room."""
-    if len(m15) < 60 or len(h1) < 60:
-        return None
+def build_signal(m15, h1, offset=0):
+    """Check one COMPLETED M15 candle. offset=0 is the newest closed candle,
+    offset=1 the one before it, and so on (V2.3 lookback).
+    Returns (candidate_or_None, reason_text)."""
+    if len(m15) < 60 + offset or len(h1) < 60:
+        return None, "not enough data"
 
     # Yahoo's newest candle can still be forming; use the previous closed candle.
-    current = m15.iloc[-2]
-    previous = m15.iloc[-3]
-    higher = h1.iloc[-2]
+    current = m15.iloc[-2 - offset]
+    previous = m15.iloc[-3 - offset]
+    if offset == 0:
+        higher = h1.iloc[-2]
+    else:
+        # last H1 candle that was already closed when this M15 candle closed
+        cutoff = current.name + pd.Timedelta(minutes=15) - pd.Timedelta(hours=1)
+        eligible = h1.loc[h1.index <= cutoff]
+        if eligible.empty:
+            return None, "no H1 data for that time"
+        higher = eligible.iloc[-1]
     price = float(current["Close"])
     atr = float(current["atr"])
     rsi = float(current["rsi"])
     if not pd.notna(atr) or atr <= 0 or not pd.notna(rsi):
-        return None
+        return None, "indicator not ready"
 
-    recent = m15.iloc[-22:-2]
+    recent = m15.iloc[-22 - offset:-2 - offset]
     resistance = recent.loc[recent["High"] > price, "High"]
     support = recent.loc[recent["Low"] < price, "Low"]
     buy_room = float(resistance.min() - price) if not resistance.empty else float("inf")
@@ -189,7 +201,11 @@ def build_signal(m15, h1):
     elif sell_trend and pullback_sell and bearish_confirmation and 32 <= rsi <= 50 and sell_room >= 2 * atr:
         side = "SELL"
     if side is None:
-        return None
+        if buy_trend:
+            return None, "uptrend but pullback/confirmation/RSI/room not met"
+        if sell_trend:
+            return None, "downtrend but pullback/confirmation/RSI/room not met"
+        return None, "no aligned M15+H1 trend"
 
     # Setup-quality score (not a probability of winning).
     pullback_distance = abs(float(previous["Low"] if side == "BUY" else previous["High"]) - float(previous["ema20"]))
@@ -201,7 +217,7 @@ def build_signal(m15, h1):
     room_points = 20 if available_room >= 3.0 * atr else 15
     score = 25 + pullback_points + momentum_points + candle_points + room_points
     if score < MIN_SCORE:
-        return None
+        return None, f"{side} setup score {score} below {MIN_SCORE}"
 
     if side == "BUY":
         stop = min(float(current["Low"]), float(previous["Low"])) - SL_ATR_BUFFER * atr
@@ -213,7 +229,7 @@ def build_signal(m15, h1):
         target = price - REWARD_RISK * risk
 
     if risk < 0.6 * atr or risk > 2.5 * atr:
-        return None
+        return None, f"{side} stop distance {risk:.2f} outside 0.6-2.5 ATR"
 
     candle_time = current.name.isoformat() if hasattr(current.name, "isoformat") else str(current.name)
     return {
@@ -227,7 +243,7 @@ def build_signal(m15, h1):
         "atr": atr,
         "candle": candle_time,
         "time": datetime.now(UTC).isoformat(),
-    }
+    }, "ok"
 
 
 def validate_live_entry(candidate):
@@ -337,7 +353,7 @@ def send_daily_report(state, today, signal_count=None):
         f"সিগন্যাল: {state['count'] if signal_count is None else signal_count}/{MAX_SIGNALS}\n"
         f"বন্ধ ট্রেড: {len(trades)} | WIN: {wins} | LOSS: {losses} | Timeout: {timeouts} | Ambiguous: {ambiguous}\n"
         f"চলমান: {len(state['open'])}\n"
-        "ফলাফল candle-based আনুমানিক হিসাব; broker execution, spread বা slippage অন্তর্ভুক্ত নয়।"
+        "ফলাফল candle-based আনুমানিক হিসাব; broker execution, spread বা slippage অন্তর্ভুক্ত নয়।"
     )
     send(message)
 
@@ -370,56 +386,80 @@ def main():
 
     # Gold market is normally closed on weekends; schedule covers weekdays.
     if bd_now.weekday() >= 5 or not 5 <= bd_now.hour < 24:
+        print("Skipped: weekend or outside 05:00-24:00 Bangladesh time.")
         save_state(state)
         return
     if state["count"] >= MAX_SIGNALS:
+        print(f"Skipped: daily limit {MAX_SIGNALS} reached.")
         save_state(state)
         return
     if state["last_ts"]:
         last_time = datetime.fromisoformat(state["last_ts"])
-        if (now - last_time).total_seconds() < MIN_GAP_MINUTES * 60:
+        waited = (now - last_time).total_seconds()
+        if waited < MIN_GAP_MINUTES * 60:
+            print(f"Skipped: minimum gap {MIN_GAP_MINUTES} min (only {waited / 60:.0f} min passed).")
             save_state(state)
             return
 
-    candidate = build_signal(m15, h1)
+    # V2.3: look at the newest closed candle first, then up to LOOKBACK_CANDLES back.
+    seen = set(state["seen_candles"]) | ({state["last_candle"]} if state["last_candle"] else set())
+    candidate, age_candles, reasons = None, 0, []
+    for offset in range(LOOKBACK_CANDLES):
+        found, reason = build_signal(m15, h1, offset)
+        if not found:
+            reasons.append(f"[-{offset}] {reason}")
+            continue
+        if found["candle"] in seen:
+            reasons.append(f"[-{offset}] already alerted")
+            continue
+        candidate, age_candles = found, offset
+        break
     if not candidate:
         save_state(state)
-        print("No qualifying setup.")
+        print("No qualifying setup. " + " | ".join(reasons))
         return
-    if candidate["candle"] == state["last_candle"]:
-        save_state(state)
-        print("Duplicate M15 candle skipped.")
-        return
+
     blackout, calendar_source = high_impact_news_blackout(now)
     if blackout:
+        print("Skipped: high-impact USD news blackout.")
         save_state(state)
         return
     try:
         candidate = validate_live_entry(candidate)
     except Exception as exc:
-        print(f"Live-entry validation blocked signal: {exc}")
+        print(f"Skipped: live-entry validation blocked signal: {exc}")
         save_state(state)
         return
 
     number = state["count"] + 1
+    sl_points = abs(candidate["entry"] - candidate["sl"])
+    tp_points = abs(candidate["tp"] - candidate["entry"])
+    old_note = (
+        f"⚠️ সিগন্যাল ক্যান্ডেল ~{age_candles * 15} মিনিট আগের; লাইভ দামে যাচাই করা হয়েছে।\n"
+        if age_candles else ""
+    )
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.2\n"
+        f"🥇 GOLD {candidate['side']} — V2.3\n"
         f"Entry: {candidate['entry']:.2f} (live quote)\n"
         f"Stop Loss: {candidate['sl']:.2f}\n"
         f"Take Profit: {candidate['tp']:.2f}\n"
+        f"SL দূরত্ব: {sl_points:.2f} pts | TP দূরত্ব: {tp_points:.2f} pts\n"
+        "MT5-তে নিজের স্পট দামের সাথে এই দূরত্ব বসান; উপরের সংখ্যা হুবহু কপি করবেন না (ফিউচার ≠ স্পট)।\n"
         f"Risk/Reward: 1:{REWARD_RISK:.1f}\n"
         f"Setup score: {candidate['score']}/100 | RSI: {candidate['rsi']:.1f}\n"
         f"Live quote: {candidate['quote_time']} | Drift: {candidate['drift']:.2f}\n"
         f"টাইমফ্রেম: M15 entry + H1 trend | Drift limit: {LIVE_MAX_DRIFT_ATR:.2f} ATR\n"
-        f"আজকের সিগন্যাল: {number}/{MAX_SIGNALS} | বাংলাদেশ সময়\n"
+        f"{old_note}"
+        f"আজকের সিগন্যাল: {number}/{MAX_SIGNALS} | বাংলাদেশ সময়\n"
         f"News calendar: {calendar_source}\n\n"
-        "ডেটা: Yahoo GC=F gold-futures proxy, spot XAU/USD নয়। "
-        "স্কোর জয়ের সম্ভাবনা নয়; আগে demo-তে যাচাই করো।" + ("\n⚠️ ক্যালেন্ডার অনুপলব্ধ: নিউজ ব্ল্যাকআউট যাচাই করা যায়নি।" if calendar_source == "unavailable" else "")
+        "ডেটা: Yahoo GC=F gold-futures proxy, spot XAU/USD নয়। "
+        "স্কোর জয়ের সম্ভাবনা নয়; আগে demo-তে যাচাই করো।" + ("\n⚠️ ক্যালেন্ডার অনুপলব্ধ: নিউজ ব্ল্যাকআউট যাচাই করা যায়নি।" if calendar_source == "unavailable" else "")
     )
     send(message)  # Persist count only after Telegram confirms delivery.
     state["count"] = number
     state["last_ts"] = now.isoformat()
     state["last_candle"] = candidate["candle"]
+    state["seen_candles"] = (state["seen_candles"] + [candidate["candle"]])[-20:]
     state["open"].append(candidate)
     save_state(state)
     print(message)
