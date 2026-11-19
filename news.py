@@ -127,22 +127,22 @@ def translate_to_bengali(text):
         response.raise_for_status()
         parts = response.json()[0]
         translated = "".join(part[0] for part in parts if part and part[0])
-        return translated.strip() or text
+        return translated.strip() or f"অনুবাদ পাওয়া যায়নি। মূল খবর: {text}"
     except Exception as exc:
         print("Bengali translation unavailable; using source text:", exc)
-        return text
+        return f"অনুবাদ পাওয়া যায়নি। মূল খবর: {text}"
 
 
 def likely_gold_impact(text):
     """A cautious keyword-based hint, not a trading signal."""
     value = (text or "").lower()
     if any(k in value for k in ("inflation", "cpi", "ppi", "jobs report", "payroll", "employment", "fed rate", "interest rate", "rate cut", "rate hike", "federal reserve")):
-        return "ডলার ও সুদের হারের প্রত্যাশা বদলাতে পারে; দিক নিশ্চিত নয়—দাম ও প্রতিক্রিয়া যাচাই করো।"
+        return "এই খবর ডলার ও সুদের হারকে প্রভাবিত করতে পারে। তাই সোনার দাম বাড়তেও বা কমতেও পারে।"
     if any(k in value for k in ("war", "conflict", "attack", "geopolitical", "sanction", "ceasefire")):
-        return "নিরাপদ বিনিয়োগের চাহিদা বাড়লে সোনায় ঊর্ধ্বচাপ আসতে পারে; নিশ্চিত নয়।"
+        return "বিশ্বে অস্থিরতা বাড়লে মানুষ সোনা কিনতে পারে। তবে দাম বাড়বেই—এমন নিশ্চয়তা নেই।"
     if any(k in value for k in ("central bank", "gold buying", "gold demand", "gold reserve", "etf")):
-        return "কেন্দ্রীয় ব্যাংক/বিনিয়োগকারীর চাহিদার তথ্য সোনার দামে প্রভাব ফেলতে পারে; দিক যাচাইসাপেক্ষ।"
-    return "প্রভাবের দিক নিশ্চিত নয়; খবরের পর XAUUSD-এর মূল্যপ্রতিক্রিয়া দেখে সিদ্ধান্ত নাও।"
+        return "বড় ব্যাংক বা বিনিয়োগকারীরা কত সোনা কিনছে, তা সোনার দামে প্রভাব ফেলতে পারে।"
+    return "এই খবরের কারণে সোনার দাম কোন দিকে যাবে, তা এখনো পরিষ্কার নয়।"
 
 
 def get_headline_alerts(state, now):
@@ -186,12 +186,12 @@ def get_headline_alerts(state, now):
         bn_title = translate_to_bengali(title)
         clean_description = re.sub(r"<[^>]+>", " ", html.unescape(description or ""))
         clean_description = re.sub(r"\s+", " ", clean_description).strip()
-        bn_summary = translate_to_bengali(clean_description[:700]) if clean_description else ""
-        impact = likely_gold_impact(title + " " + clean_description)
+        bn_summary = ""  # RSS description প্রায়ই সারাংশ নয়; ভুল সারাংশ দেখাব না।
+        impact = likely_gold_impact(title)
         message = f"📰 সোনার বাজারের খবর\n{bn_title}"
         if bn_summary:
             message += f"\n\n📝 সহজ বাংলা অনুবাদ:\n{bn_summary}"
-        message += f"\n\n🥇 সোনার দামে সম্ভাব্য প্রভাব: {impact}"
+        message += f"\n\nসহজ করে বললে: {impact}"
         message += f"\n\n🔗 মূল খবর: {link}"
         alerts.append(message)
     return alerts
