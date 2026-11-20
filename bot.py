@@ -1,6 +1,7 @@
 """Gold signal bot V2.3 — V2.2 plus candle lookback, skip reasons and point distances."""
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -121,9 +122,9 @@ def high_impact_news_blackout(now):
         except Exception as exc:
             errors.append(f"cache: {exc}")
     if events is None:
-        print("WARNING: calendar unavailable; blackout cannot be verified; not blanket-blocking signals.")
+        print("Calendar unavailable; fail-closed: signal blocked.")
         print("Calendar errors:", " | ".join(errors))
-        return False, "unavailable"
+        return True, "unavailable"
     for event in events:
         if event.get("country") != "USD" or event.get("impact") != "High":
             continue
@@ -358,7 +359,7 @@ def send_daily_report(state, today, signal_count=None):
     send(message)
 
 
-def main():
+def main(manual=False):
     now = datetime.now(UTC)
     bd_now = now.astimezone(BD)
     today = bd_now.strftime("%Y-%m-%d")
@@ -374,23 +375,29 @@ def main():
     h1 = market_data("1h", "1mo")
     update_outcomes(state, m15)
 
-    # Recover a missed report on the next successful run, including after midnight.
-    pending = state.get("pending_report")
-    if pending:
-        send_daily_report(state, pending["date"], pending["count"])
-        state["summary"] = pending["date"]
-        state["pending_report"] = None
-    elif bd_now.weekday() < 5 and bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:
-        send_daily_report(state, today, state["count"])
-        state["summary"] = today
+    # Manual /signal requests must not trigger the scheduled daily report.
+    if not manual:
+        pending = state.get("pending_report")
+        if pending:
+            send_daily_report(state, pending["date"], pending["count"])
+            state["summary"] = pending["date"]
+            state["pending_report"] = None
+        elif bd_now.weekday() < 5 and bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:
+            send_daily_report(state, today, state["count"])
+            state["summary"] = today
 
     # Gold market is normally closed on weekends; schedule covers weekdays.
     if bd_now.weekday() >= 5 or not 5 <= bd_now.hour < 24:
+        reason = "সাপ্তাহিক ছুটি বা নির্ধারিত বাজার-সময়ের বাইরে। এখন সিগন্যাল দেওয়া হবে না।"
         print("Skipped: weekend or outside 05:00-24:00 Bangladesh time.")
+        if manual:
+            send("⏸️ /signal: " + reason)
         save_state(state)
         return
     if state["count"] >= MAX_SIGNALS:
         print(f"Skipped: daily limit {MAX_SIGNALS} reached.")
+        if manual:
+            send(f"⏸️ আজকের সর্বোচ্চ {MAX_SIGNALS}টি সিগন্যাল দেওয়া হয়ে গেছে।")
         save_state(state)
         return
     if state["last_ts"]:
@@ -398,6 +405,8 @@ def main():
         waited = (now - last_time).total_seconds()
         if waited < MIN_GAP_MINUTES * 60:
             print(f"Skipped: minimum gap {MIN_GAP_MINUTES} min (only {waited / 60:.0f} min passed).")
+            if manual:
+                send(f"⏳ শেষ সিগন্যালের পর {MIN_GAP_MINUTES} মিনিট বিরতি রাখতে হবে। আরও {max(1, int((MIN_GAP_MINUTES * 60 - waited) / 60))} মিনিট পরে চেষ্টা করো।")
             save_state(state)
             return
 
@@ -417,17 +426,24 @@ def main():
     if not candidate:
         save_state(state)
         print("No qualifying setup. " + " | ".join(reasons))
+        if manual:
+            send("🔎 এখন ভালো BUY/SELL সেটআপ নেই। নিরাপত্তার কারণে জোর করে কোনো সিগন্যাল দেওয়া হয়নি।")
         return
 
     blackout, calendar_source = high_impact_news_blackout(now)
     if blackout:
-        print("Skipped: high-impact USD news blackout.")
+        print("Skipped: high-impact USD news blackout or calendar unavailable.")
+        if manual:
+            reason = "USD-র উচ্চ-প্রভাবের নিউজের সময়; তাই সিগন্যাল বন্ধ।" if calendar_source != "unavailable" else "নিউজ ক্যালেন্ডার পাওয়া যাচ্ছে না; যাচাই ছাড়া সিগন্যাল দেওয়া নিরাপদ নয়।"
+            send("📰 /signal: " + reason)
         save_state(state)
         return
     try:
         candidate = validate_live_entry(candidate)
     except Exception as exc:
         print(f"Skipped: live-entry validation blocked signal: {exc}")
+        if manual:
+            send(f"⚠️ লাইভ দাম যাচাই করা যায়নি, তাই সিগন্যাল বন্ধ রাখা হয়েছে। কারণ: {exc}")
         save_state(state)
         return
 
@@ -466,4 +482,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(manual="--manual" in sys.argv)
