@@ -5,6 +5,12 @@ on:
     - cron: "*/10 23 * * 0-4"
     - cron: "*/10 0-17 * * 1-5"
   workflow_dispatch:
+    inputs:
+      manual_signal:
+        description: "Run a user-requested /signal check"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: write
 concurrency:
@@ -23,8 +29,14 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run V2.3 signal engine
         id: bot
-        run: python bot.py
+        run: |
+          if [ "$MANUAL_SIGNAL" = "true" ]; then
+            python bot.py --manual
+          else
+            python bot.py
+          fi
         env:
+          MANUAL_SIGNAL: ${{ inputs.manual_signal }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - name: Save signal state
