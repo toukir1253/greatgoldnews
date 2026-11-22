@@ -1,14 +1,11 @@
 {
-  "date": "2026-11-22",
+  "date": "2026-11-23",
   "count": 0,
   "last_ts": "2026-11-18T10:27:44.110891+00:00",
   "last_candle": "",
   "seen_candles": [],
   "open": [],
   "history": [],
-  "summary": "2026-11-20",
-  "pending_report": {
-    "date": "2026-11-21",
-    "count": 0
-  }
+  "summary": "2026-11-22",
+  "pending_report": null
 }
