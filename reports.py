@@ -107,7 +107,64 @@ def weekly_report():
     ax.set_title("GOLD WEEKLY OUTLOOK"); ax.grid(alpha=.25); ax.legend(); fig.autofmt_xdate(); fig.tight_layout()
     send_chart(fig, caption)
 
+def multi_timeframe_analysis():
+    """Build an original H1/H4/D1 gold chart using completed candles only."""
+    hourly = get_market("3mo", "1h")
+    daily = get_market("1y", "1d")
+    # Build 4-hour candles from hourly OHLC; use only completed resampled bars.
+    four_hour = hourly[["Open", "High", "Low", "Close"]].resample("4h").agg({
+        "Open": "first", "High": "max", "Low": "min", "Close": "last"
+    }).dropna()
+    def enrich(frame):
+        frame = frame.copy()
+        close = frame["Close"]
+        frame["ema20"] = close.ewm(span=20, adjust=False).mean()
+        frame["ema50"] = close.ewm(span=50, adjust=False).mean()
+        delta = close.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+        frame["rsi"] = 100 - 100/(1 + gain/loss.replace(0, float("nan")))
+        return frame.dropna()
+    frames = [("1H", enrich(hourly).iloc[:-1]), ("4H", enrich(four_hour).iloc[:-1]), ("D1", enrich(daily).iloc[:-1])]
+    if any(len(frame) < 25 for _, frame in frames):
+        raise RuntimeError("Not enough completed candles for multi-timeframe analysis")
+    summaries = []
+    fig, axes = plt.subplots(3, 1, figsize=(11, 12))
+    for ax, (label, frame) in zip(axes, frames):
+        row = frame.iloc[-1]
+        price, e20, e50, rsi = [float(row[k]) for k in ("Close", "ema20", "ema50", "rsi")]
+        if e20 > e50 and price > e20:
+            bias = "Bullish"
+        elif e20 < e50 and price < e20:
+            bias = "Bearish"
+        else:
+            bias = "Neutral"
+        recent = frame.iloc[-20:]
+        support, resistance = float(recent["Low"].min()), float(recent["High"].max())
+        summaries.append(f"{label}: {bias}, RSI {rsi:.1f}, support {support:.2f}, resistance {resistance:.2f}")
+        tail = frame.iloc[-(72 if label == "1H" else 60 if label == "4H" else 90):]
+        ax.plot(tail.index, tail["Close"], label="Gold")
+        ax.plot(tail.index, tail["ema20"], label="EMA20")
+        ax.plot(tail.index, tail["ema50"], label="EMA50")
+        ax.axhline(support, linestyle="--", alpha=.45, label="20-bar support")
+        ax.axhline(resistance, linestyle="--", alpha=.45, label="20-bar resistance")
+        ax.set_title(f"{label} • {bias} • RSI {rsi:.1f}")
+        ax.grid(alpha=.25)
+        ax.legend(loc="upper left", ncol=3, fontsize=8)
+    fig.suptitle("GOLD MULTI-TIMEFRAME TECHNICAL ANALYSIS", fontsize=14)
+    fig.tight_layout()
+    caption = ("📊 GOLD DAILY ANALYSIS — 1H / 4H / D1\\n"
+               + "\\n".join(summaries)
+               + f"\\nসময়: {datetime.now(BD):%d %b %Y, %I:%M %p} বাংলাদেশ"
+               + "\\nSupport/Resistance হলো সাম্প্রতিক ২০টি সম্পূর্ণ candle-এর range; নিশ্চিত level নয়।"
+               + "\\nএটি প্রযুক্তিগত বিশ্লেষণ, নিশ্চিত BUY/SELL signal নয়। Yahoo GC=F futures proxy; spot XAU/USD নয়।")
+    send_chart(fig, caption)
+
+
 def chart_report(command):
+    if command == "analysis":
+        multi_timeframe_analysis()
+        return
     if command == "forecast": data = get_market("1mo", "1h")
     else: data = get_market("5d", "15m")
     row = data.iloc[-2]
