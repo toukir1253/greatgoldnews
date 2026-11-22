@@ -43,6 +43,7 @@ def load_state():
         "last_status": state.get("last_status", ""),
         "last_calendar_date": state.get("last_calendar_date", ""),
         "last_forecast_date": state.get("last_forecast_date", ""),
+        "last_analysis_date": state.get("last_analysis_date", ""),
         "last_weekly_forecast": state.get("last_weekly_forecast", ""),
     }
 
@@ -265,13 +266,24 @@ def main():
             state["last_calendar_date"] = today
         except Exception as exc:
             print("Daily calendar image failed:", exc)
-    if state["last_forecast_date"] != today:
-        try:
-            chart_report("forecast")
-            state["last_forecast_date"] = today
-        except Exception as exc:
-            print("Daily forecast image failed:", exc)
-    if bd_now.weekday() == 0 and state["last_weekly_forecast"] != week_key:
+    # The workflow runs every 10 minutes in UTC; 00:00 UTC is 06:00 Bangladesh time.
+    # Keep daily forecast, add a separate daily technical analysis at 06:00 BD.
+    if bd_now.hour == 6 and bd_now.minute < 10:
+        if state["last_forecast_date"] != today:
+            try:
+                chart_report("forecast")
+                state["last_forecast_date"] = today
+            except Exception as exc:
+                print("Daily forecast image failed:", exc)
+        if state["last_analysis_date"] != today:
+            try:
+                chart_report("analysis")
+                state["last_analysis_date"] = today
+            except Exception as exc:
+                print("Daily analysis image failed:", exc)
+
+    # Weekly outlook is delivered every Sunday morning, Bangladesh time.
+    if bd_now.weekday() == 6 and bd_now.hour == 6 and bd_now.minute < 10 and state["last_weekly_forecast"] != week_key:
         try:
             weekly_report()
             state["last_weekly_forecast"] = week_key
