@@ -6,8 +6,18 @@ on:
     - cron: "*/10 0-17 * * 1-5"
   workflow_dispatch:
     inputs:
+      manual_command:
+        description: "Telegram on-demand command"
+        required: false
+        type: choice
+        options:
+          - signal
+          - calendar
+          - forecast
+          - analysis
+        default: signal
       manual_signal:
-        description: "Run a user-requested /signal check"
+        description: "Legacy /signal trigger"
         required: false
         type: boolean
         default: false
@@ -30,12 +40,15 @@ jobs:
       - name: Run V2.3 signal engine
         id: bot
         run: |
-          if [ "$MANUAL_SIGNAL" = "true" ]; then
+          if [ -n "$MANUAL_COMMAND" ]; then
+            python bot.py --command "$MANUAL_COMMAND"
+          elif [ "$MANUAL_SIGNAL" = "true" ]; then
             python bot.py --manual
           else
             python bot.py
           fi
         env:
+          MANUAL_COMMAND: ${{ inputs.manual_command }}
           MANUAL_SIGNAL: ${{ inputs.manual_signal }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
