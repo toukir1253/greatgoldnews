@@ -1,12 +1,18 @@
-"""Gold news and market-status alerts for Telegram."""
+"""Gold/USD macro-news alerts and market status for Telegram.
+
+News impact labels describe likely market relevance, NOT a guaranteed price direction
+or a trading signal. Existing calendar, report and market-status entry points are kept.
+"""
 import hashlib
 import html
 import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
 import requests
@@ -15,31 +21,61 @@ import yfinance as yf
 from bot import SYMBOL, send
 from reports import calendar_report, chart_report, weekly_report
 
+# Existing calendar / automation settings
 IMPACTS = {"High"}
 CURRENCIES = {"USD"}
 WARN_MINUTES = 60
 STATUS_EVERY_MIN = 30
-MAX_HEADLINES = 3
+MAX_HEADLINES = 4
 STATE_FILE = Path("news_state.json")
-CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
-CALENDAR_CACHE = Path("news_calendar_cache.json")  # separate from signal bot cache
-NEWS_URL = (
-    "https://news.google.com/rss/search?q=gold+price+OR+XAUUSD+OR+%22gold+futures%22"
-    "+when:1d&hl=en-US&gl=US&ceid=US:en"
-)
+CAL_URLS = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+]
+CALENDAR_CACHE = Path("news_calendar_cache.json")
 UTC = timezone.utc
 BD = timezone(timedelta(hours=6))
+
+# A mix of official US releases and a tightly-scoped gold/USD headline search.
+# If one feed is unavailable, the others continue to work.
+NEWS_FEEDS = [
+    ("Federal Reserve", "https://www.federalreserve.gov/feeds/press_all.xml"),
+    ("US Bureau of Labor Statistics", "https://www.bls.gov/feed/bls_latest.rss"),
+    ("Gold / USD market news", (
+        "https://news.google.com/rss/search?q="
+        "(gold+OR+XAUUSD+OR+bullion+OR+%22gold+prices%22)+"
+        "(Fed+OR+inflation+OR+CPI+OR+jobs+OR+Treasury+OR+geopolitical+OR+ETF)"
+        "+when:2d&hl=en-US&gl=US&ceid=US:en"
+    )),
+]
+REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; GoldMarketNewsBot/1.0)"}
+MAX_SEEN = 600
+FRESH_MINUTES = 120
+RELEVANT_TERMS = (
+    "gold", "xau", "bullion", "precious metal", "federal reserve", "fed ",
+    "interest rate", "rate cut", "rate hike", "inflation", "consumer price",
+    "producer price", "cpi", "ppi", "payroll", "employment", "unemployment",
+    "treasury yield", "treasury bond", "us dollar", "dollar index", "dxy",
+    "central bank", "gold etf", "gold demand", "gold reserve", "geopolitical",
+    "sanction", "war ", "conflict", "safe haven",
+)
+EXCLUDE_TERMS = (
+    "golden globes", "golden boot", "golden state", "gold coin collection",
+    "coin collecting", "jewelry design", "gold necklace", "wedding ring",
+    "gold medal", "gold mining job",
+)
 
 
 def load_state():
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         state = {}
     return {
         "pre": state.get("pre", []),
         "now": state.get("now", []),
         "seen": state.get("seen", []),
+        "seen_titles": state.get("seen_titles", []),
         "last_status": state.get("last_status", ""),
         "last_calendar_date": state.get("last_calendar_date", ""),
         "last_forecast_date": state.get("last_forecast_date", ""),
@@ -52,32 +88,50 @@ def bd_time(value):
     return value.astimezone(BD).strftime("%d %b, %I:%M %p")
 
 
+def parse_datetime(value, fallback=None):
+    if not value:
+        return fallback or datetime.now(UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(str(value))
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        except (TypeError, ValueError, OverflowError):
+            return fallback or datetime.now(UTC)
+
+
 def get_calendar_alerts(state, now):
+    """Keep the original Forex Factory high-impact USD warning behavior."""
     alerts = []
     events = None
     for url in CAL_URLS:
         try:
-            response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            response = requests.get(url, timeout=12, headers=REQUEST_HEADERS)
             response.raise_for_status()
             events = response.json()
             if not isinstance(events, list):
                 raise ValueError("Calendar response is not a list")
-            CALENDAR_CACHE.write_text(json.dumps({"fetched_at": now.isoformat(), "events": events}, ensure_ascii=False), encoding="utf-8")
+            CALENDAR_CACHE.write_text(
+                json.dumps({"fetched_at": now.isoformat(), "events": events}, ensure_ascii=False),
+                encoding="utf-8",
+            )
             break
         except Exception as exc:
             print(f"Calendar feed failed ({url}): {exc}")
+
     if events is None:
         try:
             cached = json.loads(CALENDAR_CACHE.read_text(encoding="utf-8"))
-            fetched = datetime.fromisoformat(cached["fetched_at"])
-            if fetched.tzinfo is None:
-                fetched = fetched.replace(tzinfo=UTC)
-            age = (now - fetched.astimezone(UTC)).total_seconds()
+            fetched = parse_datetime(cached.get("fetched_at"))
+            age = (now - fetched).total_seconds()
             if 0 <= age <= 36 * 3600 and isinstance(cached.get("events"), list):
                 events = cached["events"]
                 print(f"Using cached calendar ({age / 3600:.1f}h old)")
         except Exception as exc:
             print("Calendar cache unavailable:", exc)
+
     if events is None:
         print("Calendar unavailable; no calendar alerts this run.")
         return alerts
@@ -86,17 +140,16 @@ def get_calendar_alerts(state, now):
         if event.get("country") not in CURRENCIES or event.get("impact") not in IMPACTS:
             continue
         try:
-            event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-            if event_time.tzinfo is None:
-                event_time = event_time.replace(tzinfo=UTC)
+            event_time = parse_datetime(event["date"])
             event_id = hashlib.sha256(
-                (event.get("title", "") + event["date"]).encode()
+                (event.get("title", "") + event["date"]).encode("utf-8")
             ).hexdigest()[:16]
             minutes = (event_time - now).total_seconds() / 60
             details = (
                 f"খবর: {translate_to_bengali(event.get('title', 'গুরুত্বপূর্ণ মার্কিন অর্থনৈতিক তথ্য'))}\n"
                 f"সময়: {bd_time(event_time)} (বাংলাদেশ)\n"
-                f"সম্ভাব্য ফল: {event.get('forecast') or 'তথ্য নেই'} | আগের ফল: {event.get('previous') or 'তথ্য নেই'}"
+                f"সম্ভাব্য ফল: {event.get('forecast') or 'তথ্য নেই'} | "
+                f"আগের ফল: {event.get('previous') or 'তথ্য নেই'}"
             )
             if 0 < minutes <= WARN_MINUTES and event_id not in state["pre"]:
                 state["pre"].append(event_id)
@@ -111,93 +164,235 @@ def get_calendar_alerts(state, now):
                 alerts.append(f"🔔 USD নিউজ প্রকাশিত\n{details}\nস্প্রেড ও volatility লক্ষ্য করো।")
         except (KeyError, TypeError, ValueError):
             continue
+
     state["pre"] = state["pre"][-300:]
     state["now"] = state["now"][-300:]
     return alerts
 
 
-
 def translate_to_bengali(text):
-    """Translate a headline/snippet to Bengali; preserve original if translation is unavailable."""
-    text = (text or "").strip()
+    """Translate a short source title/snippet; fall back safely to original text."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
     if not text:
         return ""
     try:
         response = requests.get(
             "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "auto", "tl": "bn", "dt": "t", "q": text[:900]},
+            params={"client": "gtx", "sl": "auto", "tl": "bn", "dt": "t", "q": text[:1100]},
             timeout=12,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers=REQUEST_HEADERS,
         )
         response.raise_for_status()
         parts = response.json()[0]
         translated = "".join(part[0] for part in parts if part and part[0])
-        return translated.strip() or f"অনুবাদ পাওয়া যায়নি। মূল খবর: {text}"
+        return translated.strip() or text
     except Exception as exc:
-        print("Bengali translation unavailable; using source text:", exc)
-        return f"অনুবাদ পাওয়া যায়নি। মূল খবর: {text}"
+        print("Bengali translation unavailable:", exc)
+        return text
 
 
-def likely_gold_impact(text):
-    """A cautious keyword-based hint, not a trading signal."""
-    value = (text or "").lower()
-    if any(k in value for k in ("inflation", "cpi", "ppi", "jobs report", "payroll", "employment", "fed rate", "interest rate", "rate cut", "rate hike", "federal reserve")):
-        return "এই খবর ডলার ও সুদের হারকে প্রভাবিত করতে পারে। তাই সোনার দাম বাড়তেও বা কমতেও পারে।"
-    if any(k in value for k in ("war", "conflict", "attack", "geopolitical", "sanction", "ceasefire")):
-        return "বিশ্বে অস্থিরতা বাড়লে মানুষ সোনা কিনতে পারে। তবে দাম বাড়বেই—এমন নিশ্চয়তা নেই।"
-    if any(k in value for k in ("central bank", "gold buying", "gold demand", "gold reserve", "etf")):
-        return "বড় ব্যাংক বা বিনিয়োগকারীরা কত সোনা কিনছে, তা সোনার দামে প্রভাব ফেলতে পারে।"
-    return "এই খবরের কারণে সোনার দাম কোন দিকে যাবে, তা এখনো পরিষ্কার নয়।"
+def clean_html(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"<script\b[^>]*>.*?</script>", " ", value, flags=re.I | re.S)
+    value = re.sub(r"<style\b[^>]*>.*?</style>", " ", value, flags=re.I | re.S)
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def child_text(element, names):
+    for name in names:
+        found = element.find(name)
+        if found is not None:
+            value = "".join(found.itertext()).strip()
+            if value:
+                return value
+    # Atom feeds use namespaced tags.
+    for child in list(element):
+        if child.tag.rsplit("}", 1)[-1].lower() in {n.lower() for n in names}:
+            value = "".join(child.itertext()).strip()
+            if value:
+                return value
+    return ""
+
+
+def canonical_url(url):
+    try:
+        parts = urlsplit(url.strip())
+        if not parts.scheme or not parts.netloc:
+            return url.strip()
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
+    except Exception:
+        return (url or "").strip()
+
+
+def normalize_title(title):
+    value = html.unescape(title or "").lower()
+    value = re.sub(r"\s+-\s+[^-]{2,45}$", "", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_relevant(title, description=""):
+    text = f"{title} {description}".lower()
+    if any(term in text for term in EXCLUDE_TERMS):
+        return False
+    return any(term in text for term in RELEVANT_TERMS)
+
+
+def classify_impact(title, description=""):
+    """Classify likely relevance to USD/gold, not the direction of price movement."""
+    text = f"{title} {description}".lower()
+    high = (
+        "federal reserve", "fed rate", "interest rate decision", "rate decision",
+        "fomc", "cpi", "consumer price index", "ppi", "nonfarm payroll",
+        "payrolls", "unemployment rate", "powell", "rate cut", "rate hike",
+        "emergency rate", "us inflation",
+    )
+    medium = (
+        "treasury yield", "10-year yield", "dollar index", "dxy", "gold etf",
+        "central bank", "gold reserve", "gold demand", "gold price", "bullion",
+        "geopolitical", "sanction", "military conflict", "safe haven",
+        "retail sales", "gdp", "jobless claims", "pce",
+    )
+    if any(term in text for term in high):
+        return "High", "🔴"
+    if any(term in text for term in medium):
+        return "Medium", "🟠"
+    return "Low", "🟡"
+
+
+def market_context(title, description=""):
+    """Give conditional context only; never turn a headline into a BUY/SELL call."""
+    text = f"{title} {description}".lower()
+    if any(k in text for k in ("inflation", "cpi", "ppi", "payroll", "employment", "unemployment", "fed", "fomc", "interest rate", "powell", "pce")):
+        return (
+            "USD ও মার্কিন বন্ডের ইয়েল্ডের প্রতিক্রিয়া গুরুত্বপূর্ণ। "
+            "ইয়েল্ড/ডলার বাড়লে সাধারণত সোনায় চাপ পড়ে; কমলে সোনা সহায়তা পেতে পারে। "
+            "প্রকৃত প্রতিক্রিয়া তথ্যের প্রত্যাশার তুলনায় ফলাফলের ওপর নির্ভর করবে।"
+        )
+    if any(k in text for k in ("treasury", "yield", "dollar index", "dxy", "us dollar")):
+        return (
+            "ডলার ও Treasury yield-এর দিক দেখো। সাধারণত ডলার বা ইয়েল্ড শক্তিশালী হলে "
+            "সোনায় চাপ এবং দুর্বল হলে সোনায় সহায়তা দেখা যেতে পারে।"
+        )
+    if any(k in text for k in ("war", "conflict", "attack", "geopolitical", "sanction", "safe haven")):
+        return (
+            "ভূরাজনৈতিক ঝুঁকি বাড়লে নিরাপদ সম্পদ হিসেবে সোনার চাহিদা বাড়তে পারে; "
+            "তবে ডলার ও ইয়েল্ডের বিপরীত প্রতিক্রিয়ায় দাম কমতেও পারে।"
+        )
+    if any(k in text for k in ("central bank", "gold reserve", "gold demand", "gold etf", "bullion")):
+        return (
+            "কেন্দ্রীয় ব্যাংক/ETF-এর কেনাবেচা ও বিনিয়োগ চাহিদা সোনার বাজারে প্রভাব ফেলতে পারে। "
+            "খবরটির পরিমাণ ও বাজারের প্রত্যাশা যাচাই করা জরুরি।"
+        )
+    return "খবরটি সোনার বাজারের সঙ্গে সম্পর্কিত, তবে শুধু এই শিরোনাম থেকে দামের দিক নিশ্চিত করা যায় না।"
+
+
+def fetch_feed(source, url):
+    response = requests.get(url, timeout=18, headers=REQUEST_HEADERS)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    entries = root.findall(".//item")
+    if not entries:
+        entries = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() == "entry"]
+    results = []
+    for entry in entries:
+        title = clean_html(child_text(entry, ["title"]))
+        link = child_text(entry, ["link"])
+        if not link:
+            for node in list(entry):
+                if node.tag.rsplit("}", 1)[-1].lower() == "link":
+                    link = node.attrib.get("href", "")
+                    if link:
+                        break
+        description = clean_html(child_text(entry, ["description", "summary", "content:encoded", "content"]))
+        published = child_text(entry, ["pubDate", "published", "updated", "dc:date"])
+        if title and link:
+            results.append({
+                "title": title,
+                "link": link.strip(),
+                "description": description,
+                "published": parse_datetime(published),
+                "source": source,
+            })
+    return results
+
+
+def already_seen(item, state):
+    link = canonical_url(item["link"])
+    title = normalize_title(item["title"])
+    identity = hashlib.sha256((link or title).encode("utf-8")).hexdigest()[:20]
+    if identity in state["seen"]:
+        return True
+    # Catch syndicated copies with slightly different punctuation/source suffixes.
+    for old in state["seen_titles"][-160:]:
+        if title and SequenceMatcher(None, title, old).ratio() >= 0.88:
+            return True
+    return False
 
 
 def get_headline_alerts(state, now):
     alerts = []
-    try:
-        response = requests.get(NEWS_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        response.raise_for_status()
-        items = ET.fromstring(response.content).findall("./channel/item")
-    except Exception as exc:
-        print("News RSS fetch failed:", exc)
+    items = []
+    for source, url in NEWS_FEEDS:
+        try:
+            batch = fetch_feed(source, url)
+            items.extend(batch)
+            print(f"News feed OK: {source} ({len(batch)} items)")
+        except Exception as exc:
+            print(f"News feed failed ({source}): {exc}")
+
+    if not items:
+        print("No news feeds returned items.")
         return alerts
 
-    first_run = not state["seen"]
-    fresh = []
-    for item in items:
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        if not title:
+    # New installations should not flood Telegram with old headlines on first run.
+    first_run = not state["seen"] and not state["seen_titles"]
+    candidates = []
+    unique_links = set()
+    for item in sorted(items, key=lambda x: x["published"], reverse=True):
+        title = item["title"]
+        desc = item["description"]
+        if not is_relevant(title, desc):
             continue
-        lower_title = title.lower()
-        relevant_terms = ("gold", "xau", "bullion", "precious metal", "federal reserve", "fed", "interest rate", "inflation", "cpi", "ppi", "payroll", "jobs report", "employment", "treasury yield", "dollar", "central bank")
-        irrelevant_terms = ("gold coin", "commemorative coin", "coin collection", "golden boot", "golden globes", "jewelry design")
-        if any(term in lower_title for term in irrelevant_terms) or not any(term in lower_title for term in relevant_terms):
+        link_key = canonical_url(item["link"])
+        if link_key in unique_links:
             continue
-        headline_id = hashlib.sha256(title.encode()).hexdigest()[:16]
-        if headline_id in state["seen"]:
+        unique_links.add(link_key)
+        if already_seen(item, state):
             continue
-        state["seen"].append(headline_id)
-        try:
-            published = parsedate_to_datetime(item.findtext("pubDate"))
-            if published.tzinfo is None:
-                published = published.replace(tzinfo=UTC)
-        except (TypeError, ValueError, OverflowError):
-            published = now
-        age = now - published.astimezone(UTC)
-        if not first_run and timedelta(0) <= age <= timedelta(minutes=45):
-            fresh.append((title, link, item.findtext('description') or ''))
+        # Mark examined items as seen, including old ones, so they are not replayed.
+        identity = hashlib.sha256((link_key or normalize_title(title)).encode("utf-8")).hexdigest()[:20]
+        state["seen"].append(identity)
+        state["seen_titles"].append(normalize_title(title))
+        age = now - item["published"]
+        if not first_run and timedelta(0) <= age <= timedelta(minutes=FRESH_MINUTES):
+            candidates.append(item)
 
-    state["seen"] = state["seen"][-500:]
-    for title, link, description in fresh[:MAX_HEADLINES]:
+    state["seen"] = state["seen"][-MAX_SEEN:]
+    state["seen_titles"] = state["seen_titles"][-160:]
+    for item in candidates[:MAX_HEADLINES]:
+        title = item["title"]
+        description = item["description"]
+        impact, marker = classify_impact(title, description)
         bn_title = translate_to_bengali(title)
-        clean_description = re.sub(r"<[^>]+>", " ", html.unescape(description or ""))
-        clean_description = re.sub(r"\s+", " ", clean_description).strip()
-        bn_summary = ""  # RSS description প্রায়ই সারাংশ নয়; ভুল সারাংশ দেখাব না।
-        impact = likely_gold_impact(title)
-        message = f"📰 সোনার বাজারের খবর\n{bn_title}"
-        if bn_summary:
-            message += f"\n\n📝 সহজ বাংলা অনুবাদ:\n{bn_summary}"
-        message += f"\n\nসহজ করে বললে: {impact}"
-        message += f"\n\n🔗 মূল খবর: {link}"
+        # RSS summary is translated as a short factual excerpt, not invented article content.
+        excerpt = description[:700].strip()
+        bn_summary = translate_to_bengali(excerpt) if excerpt else (
+            "প্রকাশিত শিরোনাম অনুযায়ী: " + bn_title
+        )
+        message = (
+            f"{marker} {impact.upper()} IMPACT — GOLD / USD NEWS\n"
+            f"📰 {bn_title}\n\n"
+            f"📝 বাংলা সারাংশ:\n{bn_summary}\n\n"
+            f"📊 USD / XAUUSD প্রভাব:\n{market_context(title, description)}\n\n"
+            f"🕒 {bd_time(item['published'])} (বাংলাদেশ)\n"
+            f"источник: {item['source']}\n"
+            f"🔗 মূল প্রতিবেদন: {item['link']}\n\n"
+            "⚠️ Impact মানে সম্ভাব্য বাজার-গুরুত্ব; এটি BUY/SELL সিগন্যাল নয়।"
+        )
+        # Replace the Russian source label with a Bengali label.
+        message = message.replace("источник:", "উৎস:")
         alerts.append(message)
     return alerts
 
@@ -260,14 +455,15 @@ def main():
     bd_now = now.astimezone(BD)
     today = bd_now.strftime("%Y-%m-%d")
     week_key = bd_now.strftime("%G-W%V")
+
     if state["last_calendar_date"] != today:
         try:
             calendar_report()
             state["last_calendar_date"] = today
         except Exception as exc:
             print("Daily calendar image failed:", exc)
-    # The workflow runs every 10 minutes in UTC; 00:00 UTC is 06:00 Bangladesh time.
-    # Keep daily forecast, add a separate daily technical analysis at 06:00 BD.
+
+    # Keep the existing 06:00 Bangladesh-time report schedule unchanged.
     if bd_now.hour == 6 and bd_now.minute < 10:
         if state["last_forecast_date"] != today:
             try:
@@ -282,7 +478,6 @@ def main():
             except Exception as exc:
                 print("Daily analysis image failed:", exc)
 
-    # Weekly outlook is delivered every Sunday morning, Bangladesh time.
     if bd_now.weekday() == 6 and bd_now.hour == 6 and bd_now.minute < 10 and state["last_weekly_forecast"] != week_key:
         try:
             weekly_report()
