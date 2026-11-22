@@ -90,6 +90,23 @@ def get_market(period, interval):
     data["atr"] = tr.ewm(alpha=1/14, adjust=False).mean()
     return data
 
+def weekly_report():
+    data = get_market("1y", "1d")
+    row = data.iloc[-2]
+    price, e20, e50, rsi = [float(row[k]) for k in ["Close","ema20","ema50","rsi"]]
+    if e20 > e50 and price > e20: bias = "Bullish / ঊর্ধ্বমুখী"
+    elif e20 < e50 and price < e20: bias = "Bearish / নিম্নমুখী"
+    else: bias = "Neutral / Range"
+    caption = ("📆 GOLD WEEKLY FORECAST\\n" + f"সাপ্তাহিক bias: {bias}\\nদাম: {price:.2f}\\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\\nRSI: {rsi:.1f}\\n" +
+               "এটি দৈনিক চার্টভিত্তিক সাপ্তাহিক দিকনির্দেশ; নিশ্চিত পূর্বাভাস বা BUY/SELL signal নয়। Yahoo GC=F futures proxy, spot XAU/USD নয়।")
+    tail = data.iloc[-120:]
+    fig, ax = plt.subplots(figsize=(10,5))
+    ax.plot(tail.index, tail["Close"], label="Gold futures proxy")
+    ax.plot(tail.index, tail["ema20"], label="EMA20")
+    ax.plot(tail.index, tail["ema50"], label="EMA50")
+    ax.set_title("GOLD WEEKLY OUTLOOK"); ax.grid(alpha=.25); ax.legend(); fig.autofmt_xdate(); fig.tight_layout()
+    send_chart(fig, caption)
+
 def chart_report(command):
     if command == "forecast": data = get_market("1mo", "1h")
     else: data = get_market("5d", "15m")
@@ -119,6 +136,7 @@ def run_report(command):
     try:
         if command == "calendar": calendar_report()
         elif command in ("forecast", "analysis"): chart_report(command)
+        elif command == "weekly": weekly_report()
         else: raise ValueError("Unknown report command")
     except Exception as exc:
         from bot import send
