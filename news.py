@@ -200,15 +200,11 @@ def clean_html(value):
 
 
 def child_text(element, names):
-    for name in names:
-        found = element.find(name)
-        if found is not None:
-            value = "".join(found.itertext()).strip()
-            if value:
-                return value
-    # Atom feeds use namespaced tags.
+    # Match RSS and Atom tags by local name, including namespaced dc:date/content:encoded.
+    wanted = {name.split(":")[-1].lower() for name in names}
     for child in list(element):
-        if child.tag.rsplit("}", 1)[-1].lower() in {n.lower() for n in names}:
+        local_name = child.tag.rsplit("}", 1)[-1].split(":")[-1].lower()
+        if local_name in wanted:
             value = "".join(child.itertext()).strip()
             if value:
                 return value
