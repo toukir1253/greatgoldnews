@@ -4,14 +4,6 @@
   ],
   "now": [],
   "seen": [
-    "1547838207e693f2",
-    "17ea0592cf3c023a",
-    "459ba4fa0dc15e30",
-    "ae26abb7d778af84",
-    "c8b8d2cf491efa0e",
-    "37b9a012b6911175",
-    "bdc5f169f65156e3",
-    "5e7fef7c7dbc4853",
     "1e2fbd5c3d9068b2",
     "4fc20c3c71bf190a",
     "5b9f69ef08eb504e",
@@ -503,10 +495,19 @@
     "cb68070755e18e67",
     "2ceb70cbf2441458",
     "6b2ae3f0316a0dc7",
-    "22c97c59d8de711d"
+    "22c97c59d8de711d",
+    "f8429cc453414f84",
+    "4ab5747fe580ecfb",
+    "f26c7b86bab4a174",
+    "987e419059f62b32",
+    "0a90159d3327b03f",
+    "0c5e43b452a1616e",
+    "741f1ec03efcd53e",
+    "88634f02e80e0add"
   ],
   "last_status": "2026-11-20T20:25:41.625806+00:00",
   "last_calendar_date": "2026-11-22",
   "last_forecast_date": "2026-11-22",
+  "last_analysis_date": "",
   "last_weekly_forecast": ""
 }
