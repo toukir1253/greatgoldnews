@@ -13,6 +13,7 @@ import requests
 import yfinance as yf
 
 from bot import SYMBOL, send
+from reports import calendar_report, chart_report, weekly_report
 
 IMPACTS = {"High"}
 CURRENCIES = {"USD"}
@@ -40,6 +41,9 @@ def load_state():
         "now": state.get("now", []),
         "seen": state.get("seen", []),
         "last_status": state.get("last_status", ""),
+        "last_calendar_date": state.get("last_calendar_date", ""),
+        "last_forecast_date": state.get("last_forecast_date", ""),
+        "last_weekly_forecast": state.get("last_weekly_forecast", ""),
     }
 
 
@@ -252,6 +256,27 @@ def main():
     state = load_state()
     messages = get_calendar_alerts(state, now)
     messages.extend(get_headline_alerts(state, now))
+    bd_now = now.astimezone(BD)
+    today = bd_now.strftime("%Y-%m-%d")
+    week_key = bd_now.strftime("%G-W%V")
+    if state["last_calendar_date"] != today:
+        try:
+            calendar_report()
+            state["last_calendar_date"] = today
+        except Exception as exc:
+            print("Daily calendar image failed:", exc)
+    if state["last_forecast_date"] != today:
+        try:
+            chart_report("forecast")
+            state["last_forecast_date"] = today
+        except Exception as exc:
+            print("Daily forecast image failed:", exc)
+    if bd_now.weekday() == 0 and state["last_weekly_forecast"] != week_key:
+        try:
+            weekly_report()
+            state["last_weekly_forecast"] = week_key
+        except Exception as exc:
+            print("Weekly forecast image failed:", exc)
 
     status_due = True
     if state["last_status"]:
