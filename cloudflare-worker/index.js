@@ -38,7 +38,7 @@ export default {
 
     const text = String(message.text || "").trim();
     if (/^\/start(?:@\w+)?(?:\s|$)/i.test(text)) {
-      await telegramSend(env, chatId, "GreatNews Bot চালু আছে। সিগন্যাল চাইলে /signal লিখো।");
+      await telegramSend(env, chatId, "GreatNews Bot চালু আছে। কমান্ড: /signal, /calendar, /forecast, /analysis");
       return new Response("OK", { status: 200 });
     }
 
