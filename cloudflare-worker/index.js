@@ -42,9 +42,12 @@ export default {
       return new Response("OK", { status: 200 });
     }
 
-    if (!/^\/signal(?:@\w+)?(?:\s|$)/i.test(text)) {
+    const commandMatch = text.match(/^\/(signal|calendar|forecast|analysis)(?:@\w+)?(?:\s|$)/i);
+    if (!commandMatch) {
+      if (text.startsWith("/")) await telegramSend(env, chatId, "কমান্ড: /signal, /calendar, /forecast, /analysis");
       return new Response("OK", { status: 200 });
     }
+    const command = commandMatch[1].toLowerCase();
 
     const apiUrl = "https://api.github.com/repos/toukir1253/greatgoldnews/actions/workflows/signal.yml/dispatches";
     const gh = await fetch(apiUrl, {
@@ -56,11 +59,13 @@ export default {
         "content-type": "application/json",
         "user-agent": "greatnews-signal-worker"
       },
-      body: JSON.stringify({ ref: "main", inputs: { manual_signal: "true" } })
+      body: JSON.stringify({ ref: "main", inputs: { manual_command: command, manual_signal: command === "signal" ? "true" : "false" } })
     });
 
     if (!gh.ok) {
-      await telegramSend(env, chatId, "⚠️ সিগন্যাল অনুরোধ চালু করা যায়নি। GitHub সংযোগ বা Workflow সেটিং পরীক্ষা করতে হবে।");
+      const detail = await gh.text().catch(() => "");
+      console.log("GitHub dispatch failed:", gh.status, detail.slice(0, 500));
+      await telegramSend(env, chatId, "⚠️ অনুরোধ চালু করা যায়নি। GitHub token, workflow permission বা Actions সেটিং পরীক্ষা করতে হবে।");
       return new Response("GitHub dispatch failed", { status: 502 });
     }
 
