@@ -482,4 +482,17 @@ def main(manual=False):
 
 
 if __name__ == "__main__":
-    main(manual="--manual" in sys.argv)
+    if "--command" in sys.argv:
+        try:
+            command = sys.argv[sys.argv.index("--command") + 1].lower()
+        except (ValueError, IndexError):
+            raise SystemExit("Missing command after --command")
+        if command == "signal":
+            main(manual=True)
+        elif command in {"calendar", "forecast", "analysis"}:
+            from reports import run_report
+            run_report(command)
+        else:
+            raise SystemExit(f"Unknown command: {command}")
+    else:
+        main(manual="--manual" in sys.argv)
