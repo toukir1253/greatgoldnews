@@ -1,0 +1,130 @@
+"""Telegram chart reports: economic calendar, gold forecast and M15 analysis."""
+import io
+from datetime import datetime, timedelta, timezone
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+import requests
+import yfinance as yf
+from bot import SYMBOL, TOKEN, CHAT, CAL_URLS
+
+UTC = timezone.utc
+BD = timezone(timedelta(hours=6))
+
+def send_chart(fig, caption):
+    if not TOKEN or not CHAT:
+        raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    response = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+        data={"chat_id": CHAT, "caption": caption[:1000]},
+        files={"photo": ("greatnews.png", buf, "image/png")}, timeout=45
+    )
+    response.raise_for_status()
+    if not response.json().get("ok"):
+        raise RuntimeError("Telegram rejected chart image")
+
+def get_calendar():
+    errors = []
+    for url in CAL_URLS:
+        try:
+            response = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            events = response.json()
+            if isinstance(events, list): return events
+            raise ValueError("Invalid calendar response")
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError("Economic calendar unavailable: " + " | ".join(errors[-2:]))
+
+def calendar_report():
+    now = datetime.now(UTC)
+    rows = []
+    for item in get_calendar():
+        if item.get("country") != "USD": continue
+        try:
+            stamp = datetime.fromisoformat(item["date"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None: stamp = stamp.replace(tzinfo=UTC)
+            if now - timedelta(hours=2) <= stamp <= now + timedelta(days=7):
+                rows.append((stamp, item))
+        except (KeyError, TypeError, ValueError):
+            continue
+    rows.sort(key=lambda x: x[0])
+    if not rows:
+        from bot import send
+        send("📅 USD Economic Calendar\nআগামী ৭ দিনের জন্য কোনো USD ইভেন্ট পাওয়া যায়নি।")
+        return
+    rows = rows[:20]
+    colors = {"High": "#e74c3c", "Medium": "#f39c12", "Low": "#f1c40f", "Holiday": "#95a5a6"}
+    fig, ax = plt.subplots(figsize=(11, max(4, len(rows) * .4)))
+    ax.axis("off")
+    cells = [[t.astimezone(BD).strftime("%a %d %b %I:%M %p"), str(e.get("title", "USD event"))[:45],
+              str(e.get("impact", "Other")), str(e.get("forecast") or "—"), str(e.get("previous") or "—")] for t,e in rows]
+    table = ax.table(cellText=cells, colLabels=["Bangladesh time", "USD event", "Impact", "Forecast", "Previous"],
+                     cellLoc="left", loc="center", colWidths=[.23,.39,.13,.12,.12])
+    table.auto_set_font_size(False); table.set_fontsize(8); table.scale(1, 1.5)
+    for i, (_, event) in enumerate(rows, start=1):
+        table[(i,2)].set_facecolor(colors.get(event.get("impact"), "#ecf0f1"))
+    ax.set_title("USD ECONOMIC CALENDAR • NEXT 7 DAYS", fontsize=14, pad=18)
+    fig.tight_layout()
+    send_chart(fig, "📅 USD Economic Calendar — বাংলাদেশ সময়। লাল=High, কমলা=Medium, হলুদ=Low impact।")
+
+def get_market(period, interval):
+    data = yf.download(SYMBOL, period=period, interval=interval, progress=False, auto_adjust=False, threads=False)
+    if data is None or data.empty: raise RuntimeError("Gold market data unavailable from Yahoo Finance")
+    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+    data = data.dropna().copy()
+    close = data["Close"]
+    data["ema20"] = close.ewm(span=20, adjust=False).mean()
+    data["ema50"] = close.ewm(span=50, adjust=False).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    data["rsi"] = 100 - 100/(1 + gain/loss.replace(0, float("nan")))
+    tr = pd.concat([data["High"]-data["Low"], (data["High"]-close.shift()).abs(),
+                    (data["Low"]-close.shift()).abs()], axis=1).max(axis=1)
+    data["atr"] = tr.ewm(alpha=1/14, adjust=False).mean()
+    return data
+
+def chart_report(command):
+    if command == "forecast": data = get_market("1mo", "1h")
+    else: data = get_market("5d", "15m")
+    row = data.iloc[-2]
+    price, e20, e50, rsi, atr = [float(row[k]) for k in ["Close","ema20","ema50","rsi","atr"]]
+    if e20 > e50 and price > e20: bias = "Bullish / ঊর্ধ্বমুখী"
+    elif e20 < e50 and price < e20: bias = "Bearish / নিম্নমুখী"
+    else: bias = "Neutral / Range"
+    if command == "forecast":
+        caption = ("🥇 GOLD DAILY FORECAST\n" + f"দিকনির্দেশ: {bias}\nদাম: {price:.2f}\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\nRSI: {rsi:.1f}\n" +
+                   f"সময়: {datetime.now(BD):%d %b %Y, %I:%M %p} বাংলাদেশ\nএটি সূচকভিত্তিক সম্ভাব্য bias, নিশ্চিত ভবিষ্যদ্বাণী বা BUY/SELL signal নয়।\n" +
+                   "ডেটা Yahoo GC=F futures proxy; spot XAU/USD নয়।")
+        tail = data.iloc[-72:]; title = "GOLD DAILY DIRECTIONAL OUTLOOK"
+    else:
+        caption = ("📊 GOLD M15 MARKET ANALYSIS\n" + f"Bias: {bias}\nPrice: {price:.2f}\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\n" +
+                   f"RSI: {rsi:.1f} | ATR(14): {atr:.2f}\nশেষ সম্পূর্ণ M15 candle: {data.index[-2]}\n" +
+                   "এটি বিশ্লেষণ, এন্ট্রি সিগন্যাল নয়। ডেটা Yahoo GC=F futures proxy; spot XAU/USD নয়।")
+        tail = data.iloc[-80:]; title = "GOLD M15 TECHNICAL ANALYSIS"
+    fig, ax = plt.subplots(figsize=(10,5))
+    ax.plot(tail.index, tail["Close"], label="Gold futures proxy")
+    ax.plot(tail.index, tail["ema20"], label="EMA20")
+    ax.plot(tail.index, tail["ema50"], label="EMA50")
+    ax.set_title(title); ax.grid(alpha=.25); ax.legend(); fig.autofmt_xdate(); fig.tight_layout()
+    send_chart(fig, caption)
+
+def run_report(command):
+    try:
+        if command == "calendar": calendar_report()
+        elif command in ("forecast", "analysis"): chart_report(command)
+        else: raise ValueError("Unknown report command")
+    except Exception as exc:
+        from bot import send
+        send(f"⚠️ /{command}: রিপোর্ট তৈরি করা যায়নি। কারণ: {str(exc)[:700]}")
+        raise
+
+if __name__ == "__main__":
+    import sys
+    run_report(sys.argv[1] if len(sys.argv) > 1 else "analysis")
