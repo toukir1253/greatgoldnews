@@ -97,7 +97,7 @@ def weekly_report():
     if e20 > e50 and price > e20: bias = "Bullish / ঊর্ধ্বমুখী"
     elif e20 < e50 and price < e20: bias = "Bearish / নিম্নমুখী"
     else: bias = "Neutral / Range"
-    caption = ("📆 GOLD WEEKLY FORECAST\\n" + f"সাপ্তাহিক bias: {bias}\\nদাম: {price:.2f}\\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\\nRSI: {rsi:.1f}\\n" +
+    caption = ("📆 GOLD WEEKLY FORECAST\n" + f"সাপ্তাহিক bias: {bias}\nদাম: {price:.2f}\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\nRSI: {rsi:.1f}\n" +
                "এটি দৈনিক চার্টভিত্তিক সাপ্তাহিক দিকনির্দেশ; নিশ্চিত পূর্বাভাস বা BUY/SELL signal নয়। Yahoo GC=F futures proxy, spot XAU/USD নয়।")
     tail = data.iloc[-120:]
     fig, ax = plt.subplots(figsize=(10,5))
