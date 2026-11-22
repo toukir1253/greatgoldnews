@@ -69,7 +69,8 @@ export default {
       return new Response("GitHub dispatch failed", { status: 502 });
     }
 
-    await telegramSend(env, chatId, "✅ অনুরোধ পেয়েছি। মার্কেট বিশ্লেষণ চলছে। ভালো সেটআপ না পেলে কোনো BUY/SELL দেওয়া হবে না।");
+    const labels = { signal: "সিগন্যাল", calendar: "ইকোনমিক ক্যালেন্ডার", forecast: "গোল্ড ফোরকাস্ট", analysis: "মার্কেট অ্যানালাইসিস" };
+    await telegramSend(env, chatId, `✅ ${labels[command]} অনুরোধ পেয়েছি। তৈরি হচ্ছে...`);
     return new Response("OK", { status: 200 });
   }
 };
