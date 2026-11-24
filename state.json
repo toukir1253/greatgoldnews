@@ -6,7 +6,8 @@
   "seen_candles": [
     "2026-11-24T15:45:00-05:00|Bollinger"
   ],
-  "open": [
+  "open": [],
+  "history": [
     {
       "side": "BUY",
       "entry": 3550.5,
@@ -21,10 +22,11 @@
       "strategy": "Bollinger",
       "category": "weak",
       "quote_time": "2026-11-24T21:02:00+00:00",
-      "drift": 1.0
+      "drift": 1.0,
+      "result": "WIN",
+      "closed": "2026-11-24T18:15:00-05:00"
     }
   ],
-  "history": [],
   "summary": "2026-11-24",
   "pending_report": null
 }
