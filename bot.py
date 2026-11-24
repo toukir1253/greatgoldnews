@@ -1,6 +1,6 @@
-"""Gold signal bot V2.6 — multi-strategy, 24-hour operation, no daily signal limit.
+"""Gold signal bot V2.7 — multi-strategy, 24-hour operation, no daily signal limit, Yahoo 1m quote lag fix.
 
-V2.6 changes: no time gate (runs any hour, any day) and no daily signal limit
+V2.7 changes: no time gate (runs any hour, any day) and no daily signal limit
 (MAX_SIGNALS = 999, effectively unlimited). MIN_GAP_MINUTES = 45 remains so the
 same setup is not re-sent every 10 minutes. Gold market itself is closed on
 weekends, so weekend runs normally find no setup / stale data, but the bot
@@ -25,17 +25,17 @@ import requests
 import yfinance as yf
 
 SYMBOL = "GC=F"  # Yahoo gold-futures proxy; not broker spot XAU/USD
-MAX_SIGNALS = 999  # V2.6: effectively unlimited — no daily signal limit (was 8 in V2.5)
+MAX_SIGNALS = 999  # V2.7: effectively unlimited — no daily signal limit (was 8 in V2.5)
 MIN_GAP_MINUTES = 45
 MIN_SCORE = 80  # V2.4 loosened from 85: accept slightly weaker qualifying setups
 SL_ATR_BUFFER = 0.20
 REWARD_RISK = 2.0
 LIVE_MAX_DRIFT_ATR = 0.50  # V2.4 loosened from 0.25: live price may drift up to 0.50 ATR from candle close
-LIVE_QUOTE_MAX_AGE_SECONDS = 180
+LIVE_QUOTE_MAX_AGE_SECONDS = 900  # V2.7: was 180 — Yahoo GC=F 1m feed lags ~10 min (quote stale 659s blocked signals), so allow up to 15 min; drift check (0.50 ATR) still protects entry
 TRADE_EXPIRY_BARS = 96
 LOOKBACK_CANDLES = 4  # V2.3: also check the last 4 closed M15 candles (~60 min)
 
-# V2.6 multi-strategy categories (backtest 2026-09-16..2026-11-24, 69 days, gold -18.6%).
+# V2.7 multi-strategy categories (backtest 2026-09-16..2026-11-24, 69 days, gold -18.6%).
 CATEGORY_LABEL = {"strong": "🟢 শক্তিশালী", "medium": "🟡 মাঝারি", "weak": "🔴 দুর্বল"}
 # Backtest total R per strategy, shown as a warning for Weak strategies.
 STRATEGY_BACKTEST_R = {
@@ -114,24 +114,24 @@ def market_data(interval, period):
         axis=1,
     ).max(axis=1)
     frame["atr"] = true_range.ewm(alpha=1 / 14, adjust=False).mean()
-    # V2.6: MACD 12,26,9
+    # V2.7: MACD 12,26,9
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     frame["macd"] = ema12 - ema26
     frame["macd_sig"] = frame["macd"].ewm(span=9, adjust=False).mean()
-    # V2.6: Bollinger 20,2
+    # V2.7: Bollinger 20,2
     sma20 = close.rolling(20).mean()
     sd20 = close.rolling(20).std(ddof=0)
     frame["bb_mid"] = sma20
     frame["bb_up"] = sma20 + 2 * sd20
     frame["bb_lo"] = sma20 - 2 * sd20
-    # V2.6: Stochastic 14,3,3
+    # V2.7: Stochastic 14,3,3
     lo14 = frame["Low"].rolling(14).min()
     hi14 = frame["High"].rolling(14).max()
     stoch_k = 100 * (close - lo14) / (hi14 - lo14).replace(0, float("nan"))
     frame["stoch_k"] = stoch_k.rolling(3).mean()
     frame["stoch_d"] = frame["stoch_k"].rolling(3).mean()
-    # V2.6: ADX(14) Wilder
+    # V2.7: ADX(14) Wilder
     up_move = frame["High"].diff()
     down_move = -frame["Low"].diff()
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
@@ -300,7 +300,7 @@ def build_signal(m15, h1, offset=0):
         "strategy": "EMA Pullback",
         "category": "strong",
         "adx": adx,
-        "high_confidence": bool(pd.notna(adx) and adx > 25),  # V2.6: ADX>25 subset made +10.0R in backtest
+        "high_confidence": bool(pd.notna(adx) and adx > 25),  # V2.7: ADX>25 subset made +10.0R in backtest
     }, "ok"
 
 
@@ -540,10 +540,10 @@ def rsi_divergence_signal(m15, h1, offset=0):
     return make_candidate(side, price, atr, current, previous, "RSI Divergence", "weak")
 
 
-# V2.6 priority order: Strong -> Medium -> Weak. If several match one candle,
+# V2.7 priority order: Strong -> Medium -> Weak. If several match one candle,
 # the strongest category wins (checked first).
 STRATEGY_FUNCTIONS = [
-    build_signal,        # STRONG: EMA Pullback (V2.6 baseline)
+    build_signal,        # STRONG: EMA Pullback (V2.7 baseline)
     stochastic_signal,   # MEDIUM
     fib_signal,          # MEDIUM
     macd_signal,         # WEAK
@@ -688,11 +688,11 @@ def main(manual=False):
             send_daily_report(state, pending["date"], pending["count"])
             state["summary"] = pending["date"]
             state["pending_report"] = None
-        elif bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:  # V2.6: daily report every day, not Mon-Fri only
+        elif bd_now.hour == 23 and bd_now.minute >= 50 and state["summary"] != today:  # V2.7: daily report every day, not Mon-Fri only
             send_daily_report(state, today, state["count"])
             state["summary"] = today
 
-    # V2.6: no time gate and no daily limit — signals run 24 hours, any day.
+    # V2.7: no time gate and no daily limit — signals run 24 hours, any day.
     # Gold market itself is closed on weekends, so weekend runs normally find
     # no setup / stale data, but the bot no longer blocks them.
     if state["last_ts"]:
@@ -705,9 +705,9 @@ def main(manual=False):
             save_state(state)
             return
 
-    # V2.6: newest closed candle first, strategies in Strong -> Medium -> Weak order.
+    # V2.7: newest closed candle first, strategies in Strong -> Medium -> Weak order.
     # If several strategies match one candle, the strongest category wins.
-    # seen_candles stores "candle|strategy" (V2.6); plain candle strings from V2.4
+    # seen_candles stores "candle|strategy" (V2.7); plain candle strings from V2.4
     # are kept backward compatible and block every strategy for that candle.
     seen = set(state["seen_candles"]) | ({state["last_candle"]} if state["last_candle"] else set())
     candidate, age_candles, reasons = None, 0, []
@@ -764,7 +764,7 @@ def main(manual=False):
         br = STRATEGY_BACKTEST_R.get(strat, 0)
         weak_note = (f"⚠️ ব্যাকটেস্টে লস করেছে (৬৯ দিনে {br}R), সাবধানে ট্রেড করো।\n")
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.6\n"
+        f"🥇 GOLD {candidate['side']} — V2.7\n"
         f"{cat_label} — {strat}{star}\n"
         f"{weak_note}"
         f"Entry: {candidate['entry']:.2f} (live quote)\n"
