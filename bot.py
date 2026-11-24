@@ -1,4 +1,4 @@
-"""Gold signal bot V2.3 — V2.2 plus candle lookback, skip reasons and point distances."""
+"""Gold signal bot V2.4 — V2.3 plus loosened filter: wider RSI, lower score, wider drift/pullback."""
 import json
 import os
 import sys
@@ -12,10 +12,10 @@ import yfinance as yf
 SYMBOL = "GC=F"  # Yahoo gold-futures proxy; not broker spot XAU/USD
 MAX_SIGNALS = 5
 MIN_GAP_MINUTES = 45
-MIN_SCORE = 85  # meaningful filter: reject the weakest qualifying setups
+MIN_SCORE = 80  # V2.4 loosened from 85: accept slightly weaker qualifying setups
 SL_ATR_BUFFER = 0.20
 REWARD_RISK = 2.0
-LIVE_MAX_DRIFT_ATR = 0.25
+LIVE_MAX_DRIFT_ATR = 0.50  # V2.4 loosened from 0.25: live price may drift up to 0.50 ATR from candle close
 LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TRADE_EXPIRY_BARS = 96
 LOOKBACK_CANDLES = 4  # V2.3: also check the last 4 closed M15 candles (~60 min)
@@ -185,8 +185,8 @@ def build_signal(m15, h1, offset=0):
         and price < current["ema20"]
     )
 
-    pullback_buy = float(previous["Low"]) <= float(previous["ema20"]) + 0.25 * atr
-    pullback_sell = float(previous["High"]) >= float(previous["ema20"]) - 0.25 * atr
+    pullback_buy = float(previous["Low"]) <= float(previous["ema20"]) + 0.35 * atr  # V2.4 loosened from 0.25
+    pullback_sell = float(previous["High"]) >= float(previous["ema20"]) - 0.35 * atr  # V2.4 loosened from 0.25
     bullish_confirmation = (
         price > float(current["Open"])
         and price > float(previous["High"])
@@ -197,9 +197,9 @@ def build_signal(m15, h1, offset=0):
     )
 
     side = None
-    if buy_trend and pullback_buy and bullish_confirmation and 50 <= rsi <= 68 and buy_room >= 2 * atr:
+    if buy_trend and pullback_buy and bullish_confirmation and 48 <= rsi <= 70 and buy_room >= 2 * atr:  # V2.4: was 50-68
         side = "BUY"
-    elif sell_trend and pullback_sell and bearish_confirmation and 32 <= rsi <= 50 and sell_room >= 2 * atr:
+    elif sell_trend and pullback_sell and bearish_confirmation and 30 <= rsi <= 52 and sell_room >= 2 * atr:  # V2.4: was 32-50
         side = "SELL"
     if side is None:
         if buy_trend:
@@ -211,7 +211,7 @@ def build_signal(m15, h1, offset=0):
     # Setup-quality score (not a probability of winning).
     pullback_distance = abs(float(previous["Low"] if side == "BUY" else previous["High"]) - float(previous["ema20"]))
     pullback_points = 20 if pullback_distance <= 0.10 * atr else 15
-    momentum_points = 15 if (54 <= rsi <= 64 if side == "BUY" else 36 <= rsi <= 46) else 10
+    momentum_points = 15 if (52 <= rsi <= 66 if side == "BUY" else 34 <= rsi <= 48) else 10  # V2.4 widened to match new RSI range
     candle_body = abs(float(current["Close"]) - float(current["Open"]))
     candle_points = 20 if candle_body >= 0.50 * atr else 14
     available_room = buy_room if side == "BUY" else sell_room
@@ -455,7 +455,7 @@ def main(manual=False):
         if age_candles else ""
     )
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.3\n"
+        f"🥇 GOLD {candidate['side']} — V2.4\n"
         f"Entry: {candidate['entry']:.2f} (live quote)\n"
         f"Stop Loss: {candidate['sl']:.2f}\n"
         f"Take Profit: {candidate['tp']:.2f}\n"
