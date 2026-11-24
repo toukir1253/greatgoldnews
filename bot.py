@@ -1,4 +1,13 @@
-"""Gold signal bot V2.4 — V2.3 plus loosened filter: wider RSI, lower score, wider drift/pullback."""
+"""Gold signal bot V2.5 — multi-strategy (V2.4 baseline + 8 more, each firing independently).
+
+Categories from 69-day backtest (2026-09-16 to 2026-11-24, GC=F M15, gold -18.6%):
+  STRONG: EMA Pullback baseline +6.0R (27 signals); ADX(14)>25 subset +10.0R (11 signals).
+  MEDIUM: Stochastic +1.0R (62), Fibonacci+trend +1.0R (68) — breakeven before spread.
+  WEAK (lost money in backtest — trade only as information, with care):
+    MACD -8.0R, Breakout -9.7R, Engulfing -11.0R, Bollinger -17.1R, RSI divergence -22.2R.
+  Backtest was one strong downtrend, so mean-reversion (Weak) strategies were punished
+  and trend strategies flattered; results are not a promise. Spread/slippage not modelled.
+"""
 import json
 import os
 import sys
@@ -10,7 +19,7 @@ import requests
 import yfinance as yf
 
 SYMBOL = "GC=F"  # Yahoo gold-futures proxy; not broker spot XAU/USD
-MAX_SIGNALS = 5
+MAX_SIGNALS = 8  # V2.5: raised from 5 — more strategies can fire
 MIN_GAP_MINUTES = 45
 MIN_SCORE = 80  # V2.4 loosened from 85: accept slightly weaker qualifying setups
 SL_ATR_BUFFER = 0.20
@@ -19,6 +28,14 @@ LIVE_MAX_DRIFT_ATR = 0.50  # V2.4 loosened from 0.25: live price may drift up to
 LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TRADE_EXPIRY_BARS = 96
 LOOKBACK_CANDLES = 4  # V2.3: also check the last 4 closed M15 candles (~60 min)
+
+# V2.5 multi-strategy categories (backtest 2026-09-16..2026-11-24, 69 days, gold -18.6%).
+CATEGORY_LABEL = {"strong": "🟢 শক্তিশালী", "medium": "🟡 মাঝারি", "weak": "🔴 দুর্বল"}
+# Backtest total R per strategy, shown as a warning for Weak strategies.
+STRATEGY_BACKTEST_R = {
+    "EMA Pullback": 6.0, "Stochastic": 1.0, "Fibonacci": 1.0, "MACD": -8.0,
+    "Bollinger": -17.1, "Breakout": -9.7, "Engulfing": -11.0, "RSI Divergence": -22.2,
+}
 CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
 CALENDAR_CACHE = Path("calendar_cache.json")
 CALENDAR_MAX_AGE_HOURS = 36
@@ -91,6 +108,35 @@ def market_data(interval, period):
         axis=1,
     ).max(axis=1)
     frame["atr"] = true_range.ewm(alpha=1 / 14, adjust=False).mean()
+    # V2.5: MACD 12,26,9
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    frame["macd"] = ema12 - ema26
+    frame["macd_sig"] = frame["macd"].ewm(span=9, adjust=False).mean()
+    # V2.5: Bollinger 20,2
+    sma20 = close.rolling(20).mean()
+    sd20 = close.rolling(20).std(ddof=0)
+    frame["bb_mid"] = sma20
+    frame["bb_up"] = sma20 + 2 * sd20
+    frame["bb_lo"] = sma20 - 2 * sd20
+    # V2.5: Stochastic 14,3,3
+    lo14 = frame["Low"].rolling(14).min()
+    hi14 = frame["High"].rolling(14).max()
+    stoch_k = 100 * (close - lo14) / (hi14 - lo14).replace(0, float("nan"))
+    frame["stoch_k"] = stoch_k.rolling(3).mean()
+    frame["stoch_d"] = frame["stoch_k"].rolling(3).mean()
+    # V2.5: ADX(14) Wilder
+    up_move = frame["High"].diff()
+    down_move = -frame["Low"].diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    atr14 = true_range.ewm(alpha=1 / 14, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr14
+    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr14
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan"))
+    frame["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+    frame["plus_di"] = plus_di
+    frame["minus_di"] = minus_di
     return frame
 
 
@@ -233,6 +279,7 @@ def build_signal(m15, h1, offset=0):
         return None, f"{side} stop distance {risk:.2f} outside 0.6-2.5 ATR"
 
     candle_time = current.name.isoformat() if hasattr(current.name, "isoformat") else str(current.name)
+    adx = float(current["adx"]) if "adx" in current and pd.notna(current["adx"]) else float("nan")
     return {
         "side": side,
         "entry": price,
@@ -244,8 +291,261 @@ def build_signal(m15, h1, offset=0):
         "atr": atr,
         "candle": candle_time,
         "time": datetime.now(UTC).isoformat(),
+        "strategy": "EMA Pullback",
+        "category": "strong",
+        "adx": adx,
+        "high_confidence": bool(pd.notna(adx) and adx > 25),  # V2.5: ADX>25 subset made +10.0R in backtest
     }, "ok"
 
+
+
+def _rows(m15, h1, offset=0):
+    """Return (current, previous, higher, reason) for one closed M15 candle."""
+    if len(m15) < 60 + offset or len(h1) < 60:
+        return None, None, None, "not enough data"
+    current = m15.iloc[-2 - offset]
+    previous = m15.iloc[-3 - offset]
+    if offset == 0:
+        higher = h1.iloc[-2]
+    else:
+        cutoff = current.name + pd.Timedelta(minutes=15) - pd.Timedelta(hours=1)
+        eligible = h1.loc[h1.index <= cutoff]
+        if eligible.empty:
+            return None, None, None, "no H1 data for that time"
+        higher = eligible.iloc[-1]
+    return current, previous, higher, ""
+
+
+def _trend_ok(current, higher, side):
+    if side == "BUY":
+        return (higher["ema20"] > higher["ema50"] and higher["Close"] > higher["ema20"]
+                and current["ema20"] > current["ema50"] and float(current["Close"]) > current["ema20"])
+    return (higher["ema20"] < higher["ema50"] and higher["Close"] < higher["ema20"]
+            and current["ema20"] < current["ema50"] and float(current["Close"]) < current["ema20"])
+
+
+def make_candidate(side, price, atr, current, previous, strategy_name, category, score=80):
+    """Build SL/TP exactly like build_signal (SL = candle low/high ∓ 0.20 ATR, TP = 2R).
+    Returns (candidate_or_None, reason)."""
+    rsi = float(current["rsi"]) if pd.notna(current["rsi"]) else float("nan")
+    if side == "BUY":
+        stop = min(float(current["Low"]), float(previous["Low"])) - SL_ATR_BUFFER * atr
+        risk = price - stop
+        target = price + REWARD_RISK * risk
+    else:
+        stop = max(float(current["High"]), float(previous["High"])) + SL_ATR_BUFFER * atr
+        risk = stop - price
+        target = price - REWARD_RISK * risk
+    if risk < 0.6 * atr or risk > 2.5 * atr:
+        return None, f"{side} stop distance {risk:.2f} outside 0.6-2.5 ATR"
+    candle_time = current.name.isoformat() if hasattr(current.name, "isoformat") else str(current.name)
+    return {
+        "side": side, "entry": price, "sl": stop, "tp": target, "rsi": rsi,
+        "score": score, "risk": risk, "atr": atr, "candle": candle_time,
+        "time": datetime.now(UTC).isoformat(),
+        "strategy": strategy_name, "category": category,
+    }, "ok"
+
+
+def _window(m15, offset):
+    """20 M15 bars before the current candle (same window as the backtest)."""
+    return m15.iloc[-22 - offset:-2 - offset]
+
+
+def macd_signal(m15, h1, offset=0):
+    """WEAK (backtest -8.0R): MACD crossover + EMA trend alignment + confirmation candle."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    if pd.isna(current["macd"]) or pd.isna(current["macd_sig"]):
+        return None, "MACD not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    side = None
+    if (previous["macd"] <= previous["macd_sig"] and current["macd"] > current["macd_sig"]
+            and price > float(current["Open"]) and _trend_ok(current, higher, "BUY")):
+        side = "BUY"
+    elif (previous["macd"] >= previous["macd_sig"] and current["macd"] < current["macd_sig"]
+            and price < float(current["Open"]) and _trend_ok(current, higher, "SELL")):
+        side = "SELL"
+    if side is None:
+        return None, "no MACD crossover with trend"
+    return make_candidate(side, price, atr, current, previous, "MACD", "weak")
+
+
+def stochastic_signal(m15, h1, offset=0):
+    """MEDIUM (backtest +1.0R): Stochastic crossover in oversold/overbought + EMA trend."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    if pd.isna(current["stoch_k"]) or pd.isna(current["stoch_d"]):
+        return None, "Stochastic not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    side = None
+    if (previous["stoch_k"] <= previous["stoch_d"] and current["stoch_k"] > current["stoch_d"]
+            and current["stoch_k"] < 30 and current["ema20"] > current["ema50"]
+            and price > float(current["Open"])):
+        side = "BUY"
+    elif (previous["stoch_k"] >= previous["stoch_d"] and current["stoch_k"] < current["stoch_d"]
+            and current["stoch_k"] > 70 and current["ema20"] < current["ema50"]
+            and price < float(current["Open"])):
+        side = "SELL"
+    if side is None:
+        return None, "no Stochastic crossover in zone"
+    return make_candidate(side, price, atr, current, previous, "Stochastic", "medium")
+
+
+def fib_signal(m15, h1, offset=0):
+    """MEDIUM (backtest +1.0R): Fibonacci 38.2/50/61.8% retracement bounce + EMA trend."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    win = _window(m15, offset)
+    hi, lo = float(win["High"].max()), float(win["Low"].min())
+    rng = hi - lo
+    if rng <= 0:
+        return None, "no Fib swing range"
+    hi_t, lo_t = win["High"].idxmax(), win["Low"].idxmin()
+    side = None
+    if lo_t < hi_t:  # up-swing: buy at retracement from the high
+        for f in (0.382, 0.50, 0.618):
+            lvl = hi - f * rng
+            if (abs(float(previous["Low"]) - lvl) <= 0.25 * atr
+                    and price > float(current["Open"]) and price > float(previous["High"])
+                    and _trend_ok(current, higher, "BUY")):
+                side = "BUY"
+                break
+    if side is None and hi_t < lo_t:  # down-swing: sell at retracement from the low
+        for f in (0.382, 0.50, 0.618):
+            lvl = lo + f * rng
+            if (abs(float(previous["High"]) - lvl) <= 0.25 * atr
+                    and price < float(current["Open"]) and price < float(previous["Low"])
+                    and _trend_ok(current, higher, "SELL")):
+                side = "SELL"
+                break
+    if side is None:
+        return None, "no Fibonacci bounce with trend"
+    return make_candidate(side, price, atr, current, previous, "Fibonacci", "medium")
+
+
+def bollinger_signal(m15, h1, offset=0):
+    """WEAK (backtest -17.1R): Bollinger bounce — close back inside after touching a band."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    if pd.isna(current["bb_lo"]):
+        return None, "Bollinger not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    side = None
+    if (previous["Close"] < previous["bb_lo"] and price > current["bb_lo"]
+            and price > float(current["Open"])):
+        side = "BUY"
+    elif (previous["Close"] > previous["bb_up"] and price < current["bb_up"]
+            and price < float(current["Open"])):
+        side = "SELL"
+    if side is None:
+        return None, "no Bollinger bounce"
+    return make_candidate(side, price, atr, current, previous, "Bollinger", "weak")
+
+
+def breakout_signal(m15, h1, offset=0):
+    """WEAK (backtest -9.7R): breakout of previous 20-candle high/low + confirmation."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    prev20 = _window(m15, offset)
+    hi20, lo20 = float(prev20["High"].max()), float(prev20["Low"].min())
+    side = None
+    if price > hi20 + 0.10 * atr and price > float(current["Open"]):
+        side = "BUY"
+    elif price < lo20 - 0.10 * atr and price < float(current["Open"]):
+        side = "SELL"
+    if side is None:
+        return None, "no 20-candle breakout"
+    return make_candidate(side, price, atr, current, previous, "Breakout", "weak")
+
+
+def engulfing_signal(m15, h1, offset=0):
+    """WEAK (backtest -11.0R): engulfing candle at/near EMA20 with EMA trend."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    bull = (current["Open"] < previous["Close"] and price > previous["Open"]
+            and price > float(current["Open"]) and previous["Close"] < previous["Open"])
+    bear = (current["Open"] > previous["Close"] and price < previous["Open"]
+            and price < float(current["Open"]) and previous["Close"] > previous["Open"])
+    side = None
+    if bull and (abs(float(current["Low"]) - current["ema20"]) <= 0.5 * atr
+                 or abs(price - current["ema20"]) <= 0.5 * atr) and current["ema20"] > current["ema50"]:
+        side = "BUY"
+    elif bear and (abs(float(current["High"]) - current["ema20"]) <= 0.5 * atr
+                   or abs(price - current["ema20"]) <= 0.5 * atr) and current["ema20"] < current["ema50"]:
+        side = "SELL"
+    if side is None:
+        return None, "no engulfing at EMA20"
+    return make_candidate(side, price, atr, current, previous, "Engulfing", "weak")
+
+
+def rsi_divergence_signal(m15, h1, offset=0):
+    """WEAK (backtest -22.2R, worst): RSI divergence — price new extreme, RSI weaker + reversal."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    if pd.isna(current["rsi"]):
+        return None, "RSI not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    win = _window(m15, offset)
+    side = None
+    hi_idx = win["High"].idxmax()
+    hi_pos = win.index.get_loc(hi_idx)
+    if (float(current["High"]) > float(win["High"].max()) and float(current["rsi"]) < float(win["rsi"].iloc[hi_pos])
+            and price < float(current["Open"]) and price < float(previous["Close"])):
+        side = "SELL"
+    lo_idx = win["Low"].idxmin()
+    lo_pos = win.index.get_loc(lo_idx)
+    if side is None and (float(current["Low"]) < float(win["Low"].min()) and float(current["rsi"]) > float(win["rsi"].iloc[lo_pos])
+            and price > float(current["Open"]) and price > float(previous["Close"])):
+        side = "BUY"
+    if side is None:
+        return None, "no RSI divergence"
+    return make_candidate(side, price, atr, current, previous, "RSI Divergence", "weak")
+
+
+# V2.5 priority order: Strong -> Medium -> Weak. If several match one candle,
+# the strongest category wins (checked first).
+STRATEGY_FUNCTIONS = [
+    build_signal,        # STRONG: EMA Pullback (V2.5 baseline)
+    stochastic_signal,   # MEDIUM
+    fib_signal,          # MEDIUM
+    macd_signal,         # WEAK
+    bollinger_signal,    # WEAK
+    breakout_signal,     # WEAK
+    engulfing_signal,    # WEAK
+    rsi_divergence_signal,  # WEAK
+]
 
 def validate_live_entry(candidate):
     """Fetch a fresh 1-minute quote and reject entries that have drifted."""
@@ -410,19 +710,26 @@ def main(manual=False):
             save_state(state)
             return
 
-    # V2.3: look at the newest closed candle first, then up to LOOKBACK_CANDLES back.
+    # V2.5: newest closed candle first, strategies in Strong -> Medium -> Weak order.
+    # If several strategies match one candle, the strongest category wins.
+    # seen_candles stores "candle|strategy" (V2.5); plain candle strings from V2.4
+    # are kept backward compatible and block every strategy for that candle.
     seen = set(state["seen_candles"]) | ({state["last_candle"]} if state["last_candle"] else set())
     candidate, age_candles, reasons = None, 0, []
     for offset in range(LOOKBACK_CANDLES):
-        found, reason = build_signal(m15, h1, offset)
-        if not found:
-            reasons.append(f"[-{offset}] {reason}")
-            continue
-        if found["candle"] in seen:
-            reasons.append(f"[-{offset}] already alerted")
-            continue
-        candidate, age_candles = found, offset
-        break
+        for strategy_fn in STRATEGY_FUNCTIONS:
+            found, reason = strategy_fn(m15, h1, offset)
+            if not found:
+                reasons.append(f"[-{offset}] {strategy_fn.__name__}: {reason}")
+                continue
+            key = f"{found['candle']}|{found['strategy']}"
+            if key in seen or found["candle"] in seen:
+                reasons.append(f"[-{offset}] {found['strategy']} already alerted")
+                continue
+            candidate, age_candles = found, offset
+            break
+        if candidate:
+            break
     if not candidate:
         save_state(state)
         print("No qualifying setup. " + " | ".join(reasons))
@@ -454,8 +761,17 @@ def main(manual=False):
         f"⚠️ সিগন্যাল ক্যান্ডেল ~{age_candles * 15} মিনিট আগের; লাইভ দামে যাচাই করা হয়েছে।\n"
         if age_candles else ""
     )
+    cat_label = CATEGORY_LABEL.get(candidate.get("category", "medium"), "🟡 মাঝারি")
+    strat = candidate.get("strategy", "EMA Pullback")
+    star = " ⭐" if candidate.get("high_confidence") else ""
+    weak_note = ""
+    if candidate.get("category") == "weak":
+        br = STRATEGY_BACKTEST_R.get(strat, 0)
+        weak_note = (f"⚠️ ব্যাকটেস্টে লস করেছে (৬৯ দিনে {br}R), সাবধানে ট্রেড করো।\n")
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.4\n"
+        f"🥇 GOLD {candidate['side']} — V2.5\n"
+        f"{cat_label} — {strat}{star}\n"
+        f"{weak_note}"
         f"Entry: {candidate['entry']:.2f} (live quote)\n"
         f"Stop Loss: {candidate['sl']:.2f}\n"
         f"Take Profit: {candidate['tp']:.2f}\n"
@@ -475,7 +791,7 @@ def main(manual=False):
     state["count"] = number
     state["last_ts"] = now.isoformat()
     state["last_candle"] = candidate["candle"]
-    state["seen_candles"] = (state["seen_candles"] + [candidate["candle"]])[-20:]
+    state["seen_candles"] = (state["seen_candles"] + [f"{candidate['candle']}|{candidate.get('strategy', 'EMA Pullback')}"])[-40:]
     state["open"].append(candidate)
     save_state(state)
     print(message)
