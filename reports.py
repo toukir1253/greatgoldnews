@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import requests
 import yfinance as yf
-from bot import SYMBOL, TOKEN, CHAT, CHATS, CAL_URLS
+from bot import SYMBOL, TOKEN, CHAT, CHATS, REPLY_TO, CAL_URLS
 
 UTC = timezone.utc
 BD = timezone(timedelta(hours=6))
@@ -20,8 +20,10 @@ def send_chart(fig, caption):
     plt.close(fig)
     buf.seek(0)
     image = buf.getvalue()
+    # V2.11: manual reply goes only to the requester; auto runs broadcast.
+    targets = [REPLY_TO] if REPLY_TO else CHATS
     errors = []
-    for chat_id in CHATS:
+    for chat_id in targets:
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
@@ -33,7 +35,7 @@ def send_chart(fig, caption):
                 raise RuntimeError("Telegram rejected chart image")
         except Exception as exc:
             errors.append(f"{chat_id}: {exc}")
-    if errors and len(errors) == len(CHATS):
+    if errors and len(errors) == len(targets):
         raise RuntimeError("Telegram chart send failed for all chats: " + "; ".join(errors))
 
 def get_calendar():

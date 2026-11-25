@@ -3,6 +3,11 @@
 V2.10: multi-user support — TELEGRAM_CHAT_ID is a comma-separated list of
   allowed chat IDs (owner + friends); send() delivers to every chat.
 
+V2.11: private manual replies — when MANUAL_CHAT_ID is set (workflow dispatch
+  input manual_chat_id, sent by the Cloudflare Worker), a manual/on-demand
+  command replies ONLY to that chat; scheduled auto runs (no MANUAL_CHAT_ID)
+  still broadcast to all CHATS.
+
 V2.8 changes (on top of V2.7: 24-hour operation, no daily signal limit):
   - New Telegram commands: /price (live GC=F quote), /news (latest 5 gold/USD
     headlines, on demand only — does not touch the 10-min auto news), /performance
@@ -62,6 +67,10 @@ STATE = Path("state.json")
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHATS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
 CHAT = CHATS[0] if CHATS else ""  # backward-compat alias: first (owner) chat
+# V2.11: manual/on-demand reply target — set by the workflow from dispatch
+# input manual_chat_id. When set, send()/send_chart() reply only to this chat;
+# when empty (scheduled auto runs), they broadcast to all CHATS.
+REPLY_TO = os.getenv("MANUAL_CHAT_ID", "").strip() or None
 UTC = timezone.utc
 BD = timezone(timedelta(hours=6))
 
@@ -69,8 +78,10 @@ BD = timezone(timedelta(hours=6))
 def send(message):
     if not TOKEN or not CHATS:
         raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID secret")
+    # V2.11: manual reply goes only to the requester; auto runs broadcast.
+    targets = [REPLY_TO] if REPLY_TO else CHATS
     errors = []
-    for chat_id in CHATS:
+    for chat_id in targets:
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -82,7 +93,7 @@ def send(message):
                 raise RuntimeError("Telegram API rejected the message")
         except Exception as exc:
             errors.append(f"{chat_id}: {exc}")
-    if errors and len(errors) == len(CHATS):
+    if errors and len(errors) == len(targets):
         raise RuntimeError("Telegram send failed for all chats: " + "; ".join(errors))
 
 

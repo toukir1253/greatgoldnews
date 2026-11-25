@@ -60,7 +60,7 @@ export default {
         "content-type": "application/json",
         "user-agent": "greatnews-signal-worker"
       },
-      body: JSON.stringify({ ref: "main", inputs: { manual_command: command, manual_signal: command === "signal" ? "true" : "false" } })
+      body: JSON.stringify({ ref: "main", inputs: { manual_command: command, manual_signal: command === "signal" ? "true" : "false", manual_chat_id: chatId } })
     });
 
     if (!gh.ok) {
