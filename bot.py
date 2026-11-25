@@ -1,5 +1,8 @@
 """Gold signal bot V2.8 — /price /news /performance, DXY filter, S/R + lot size, Ichimoku + VWAP.
 
+V2.10: multi-user support — TELEGRAM_CHAT_ID is a comma-separated list of
+  allowed chat IDs (owner + friends); send() delivers to every chat.
+
 V2.8 changes (on top of V2.7: 24-hour operation, no daily signal limit):
   - New Telegram commands: /price (live GC=F quote), /news (latest 5 gold/USD
     headlines, on demand only — does not touch the 10-min auto news), /performance
@@ -57,22 +60,30 @@ CALENDAR_CACHE = Path("calendar_cache.json")
 CALENDAR_MAX_AGE_HOURS = 36
 STATE = Path("state.json")
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+CHATS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+CHAT = CHATS[0] if CHATS else ""  # backward-compat alias: first (owner) chat
 UTC = timezone.utc
 BD = timezone(timedelta(hours=6))
 
 
 def send(message):
-    if not TOKEN or not CHAT:
+    if not TOKEN or not CHATS:
         raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID secret")
-    response = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHAT, "text": message, "disable_web_page_preview": True},
-        timeout=25,
-    )
-    response.raise_for_status()
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram API rejected the message")
+    errors = []
+    for chat_id in CHATS:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                data={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
+                timeout=25,
+            )
+            response.raise_for_status()
+            if not response.json().get("ok"):
+                raise RuntimeError("Telegram API rejected the message")
+        except Exception as exc:
+            errors.append(f"{chat_id}: {exc}")
+    if errors and len(errors) == len(CHATS):
+        raise RuntimeError("Telegram send failed for all chats: " + "; ".join(errors))
 
 
 def load_state():

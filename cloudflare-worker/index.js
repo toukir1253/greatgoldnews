@@ -31,8 +31,9 @@ export default {
     }
 
     const chatId = String(message.chat.id);
-    const ownerId = String(env.OWNER_CHAT_ID || "");
-    if (message.chat.type !== "private" || !ownerId || chatId !== ownerId) {
+    // V2.10: multi-user — OWNER_CHAT_ID is a comma-separated list of allowed chat IDs.
+    const allowedIds = String(env.OWNER_CHAT_ID || "").split(",").map(s => s.trim()).filter(Boolean);
+    if (message.chat.type !== "private" || !allowedIds.length || !allowedIds.includes(chatId)) {
       return new Response("OK", { status: 200 });
     }
 

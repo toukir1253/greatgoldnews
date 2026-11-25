@@ -7,26 +7,34 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import requests
 import yfinance as yf
-from bot import SYMBOL, TOKEN, CHAT, CAL_URLS
+from bot import SYMBOL, TOKEN, CHAT, CHATS, CAL_URLS
 
 UTC = timezone.utc
 BD = timezone(timedelta(hours=6))
 
 def send_chart(fig, caption):
-    if not TOKEN or not CHAT:
+    if not TOKEN or not CHATS:
         raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
-    response = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-        data={"chat_id": CHAT, "caption": caption[:1000]},
-        files={"photo": ("greatnews.png", buf, "image/png")}, timeout=45
-    )
-    response.raise_for_status()
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram rejected chart image")
+    image = buf.getvalue()
+    errors = []
+    for chat_id in CHATS:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption[:1000]},
+                files={"photo": ("greatnews.png", io.BytesIO(image), "image/png")}, timeout=45
+            )
+            response.raise_for_status()
+            if not response.json().get("ok"):
+                raise RuntimeError("Telegram rejected chart image")
+        except Exception as exc:
+            errors.append(f"{chat_id}: {exc}")
+    if errors and len(errors) == len(CHATS):
+        raise RuntimeError("Telegram chart send failed for all chats: " + "; ".join(errors))
 
 def get_calendar():
     errors = []
