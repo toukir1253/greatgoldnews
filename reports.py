@@ -128,7 +128,8 @@ def multi_timeframe_analysis():
     frames = [("1H", enrich(hourly).iloc[:-1]), ("4H", enrich(four_hour).iloc[:-1]), ("D1", enrich(daily).iloc[:-1])]
     if any(len(frame) < 25 for _, frame in frames):
         raise RuntimeError("Not enough completed candles for multi-timeframe analysis")
-    summaries = []
+    # V2.9: structured per-timeframe details for the formatted caption.
+    details = []
     fig, axes = plt.subplots(3, 1, figsize=(11, 12))
     for ax, (label, frame) in zip(axes, frames):
         row = frame.iloc[-1]
@@ -141,7 +142,7 @@ def multi_timeframe_analysis():
             bias = "Neutral"
         recent = frame.iloc[-20:]
         support, resistance = float(recent["Low"].min()), float(recent["High"].max())
-        summaries.append(f"{label}: {bias}, RSI {rsi:.1f}, support {support:.2f}, resistance {resistance:.2f}")
+        details.append((label, bias, rsi, support, resistance))
         tail = frame.iloc[-(72 if label == "1H" else 60 if label == "4H" else 90):]
         ax.plot(tail.index, tail["Close"], label="Gold")
         ax.plot(tail.index, tail["ema20"], label="EMA20")
@@ -153,11 +154,34 @@ def multi_timeframe_analysis():
         ax.legend(loc="upper left", ncol=3, fontsize=8)
     fig.suptitle("GOLD MULTI-TIMEFRAME TECHNICAL ANALYSIS", fontsize=14)
     fig.tight_layout()
-    caption = ("📊 GOLD DAILY ANALYSIS — 1H / 4H / D1\\n"
-               + "\\n".join(summaries)
-               + f"\\nসময়: {datetime.now(BD):%d %b %Y, %I:%M %p} বাংলাদেশ"
-               + "\\nSupport/Resistance হলো সাম্প্রতিক ২০টি সম্পূর্ণ candle-এর range; নিশ্চিত level নয়।"
-               + "\\nএটি প্রযুক্তিগত বিশ্লেষণ, নিশ্চিত BUY/SELL signal নয়। Yahoo GC=F futures proxy; spot XAU/USD নয়।")
+    # V2.9: formatted caption with overall bias + one block per timeframe.
+    bias_icon = {"Bullish": "📈", "Bearish": "📉", "Neutral": "➖"}
+    tf_icon = {"1H": "🕐", "4H": "🕓", "D1": "📅"}
+    counts = {"Bullish": 0, "Bearish": 0, "Neutral": 0}
+    for _, bias, _, _, _ in details:
+        counts[bias] += 1
+    majority = max(counts, key=lambda b: counts[b])
+    if counts[majority] >= 2:
+        overall = f"{bias_icon[majority]} Overall: {majority} ({counts[majority]}/3)"
+    else:
+        overall = ("➖ Overall: Mixed "
+                   f"({counts['Bullish']} Bullish, {counts['Bearish']} Bearish, {counts['Neutral']} Neutral)")
+    cap_lines = [
+        "📊 GOLD DAILY ANALYSIS",
+        f"🕐 {datetime.now(BD):%d %b %Y, %I:%M %p} বাংলাদেশ",
+        "",
+        overall,
+        "",
+    ]
+    for label, bias, rsi, support, resistance in details:
+        cap_lines += [
+            f"{tf_icon.get(label, '🕐')} {label} — {bias_icon[bias]} {bias}",
+            f"   RSI: {rsi:.1f}",
+            f"   Support: {support:.2f} | Resistance: {resistance:.2f}",
+            "",
+        ]
+    cap_lines.append("⚠️ এটা বিশ্লেষণ, BUY/SELL সিগন্যাল নয়। Support/Resistance সাম্প্রতিক ২০টি candle-এর range। Yahoo GC=F futures proxy; spot XAU/USD নয়।")
+    caption = chr(10).join(cap_lines)
     send_chart(fig, caption)
 
 
@@ -173,7 +197,7 @@ def chart_report(command):
     elif e20 < e50 and price < e20: bias = "Bearish / নিম্নমুখী"
     else: bias = "Neutral / Range"
     if command == "forecast":
-        caption = ("🥇 GOLD DAILY FORECAST\n" + f"দিকনির্দেশ: {bias}\nদাম: {price:.2f}\nEMA20: {e20:.2f} | EMA50: {e50:.2f}\nRSI: {rsi:.1f}\n" +
+        caption = ("🥇 GOLD DAILY FORECAST\n" + f"দিকনির্দেশ: {bias}\nদাম: {price:.2f}\nEMA20: {e20:.2f}\nEMA50: {e50:.2f}\nRSI: {rsi:.1f}\n" +
                    f"সময়: {datetime.now(BD):%d %b %Y, %I:%M %p} বাংলাদেশ\nএটি সূচকভিত্তিক সম্ভাব্য bias, নিশ্চিত ভবিষ্যদ্বাণী বা BUY/SELL signal নয়।\n" +
                    "ডেটা Yahoo GC=F futures proxy; spot XAU/USD নয়।")
         tail = data.iloc[-72:]; title = "GOLD DAILY DIRECTIONAL OUTLOOK"
