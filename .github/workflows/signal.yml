@@ -24,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+      manual_chat_id:
+        description: "Requesting Telegram chat ID (set by Worker)"
+        required: false
+        type: string
+        default: ""
 permissions:
   contents: write
 concurrency:
@@ -53,6 +58,7 @@ jobs:
         env:
           MANUAL_COMMAND: ${{ inputs.manual_command }}
           MANUAL_SIGNAL: ${{ inputs.manual_signal }}
+          MANUAL_CHAT_ID: ${{ inputs.manual_chat_id }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - name: Save signal state
