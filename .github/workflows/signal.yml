@@ -15,6 +15,9 @@ on:
           - calendar
           - forecast
           - analysis
+          - price
+          - news
+          - performance
         default: signal
       manual_signal:
         description: "Legacy /signal trigger"
