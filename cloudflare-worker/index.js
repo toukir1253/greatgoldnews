@@ -38,13 +38,13 @@ export default {
 
     const text = String(message.text || "").trim();
     if (/^\/start(?:@\w+)?(?:\s|$)/i.test(text)) {
-      await telegramSend(env, chatId, "GreatNews Bot চালু আছে। কমান্ড: /signal, /calendar, /forecast, /analysis");
+      await telegramSend(env, chatId, "GreatNews Bot চালু আছে। কমান্ড: /signal, /price, /news, /performance, /calendar, /forecast, /analysis");
       return new Response("OK", { status: 200 });
     }
 
-    const commandMatch = text.match(/^\/(signal|calendar|forecast|analysis)(?:@\w+)?(?:\s|$)/i);
+    const commandMatch = text.match(/^\/(signal|price|news|performance|calendar|forecast|analysis)(?:@\w+)?(?:\s|$)/i);
     if (!commandMatch) {
-      if (text.startsWith("/")) await telegramSend(env, chatId, "কমান্ড: /signal, /calendar, /forecast, /analysis");
+      if (text.startsWith("/")) await telegramSend(env, chatId, "কমান্ড: /signal, /price, /news, /performance, /calendar, /forecast, /analysis");
       return new Response("OK", { status: 200 });
     }
     const command = commandMatch[1].toLowerCase();
@@ -69,7 +69,7 @@ export default {
       return new Response("GitHub dispatch failed", { status: 502 });
     }
 
-    const labels = { signal: "সিগন্যাল", calendar: "ইকোনমিক ক্যালেন্ডার", forecast: "গোল্ড ফোরকাস্ট", analysis: "মার্কেট অ্যানালাইসিস" };
+    const labels = { signal: "সিগন্যাল", price: "লাইভ দাম", news: "সর্বশেষ নিউজ", performance: "পারফরম্যান্স", calendar: "ইকোনমিক ক্যালেন্ডার", forecast: "গোল্ড ফোরকাস্ট", analysis: "মার্কেট অ্যানালাইসিস" };
     await telegramSend(env, chatId, `✅ ${labels[command]} অনুরোধ পেয়েছি। তৈরি হচ্ছে...`);
     return new Response("OK", { status: 200 });
   }

@@ -1,12 +1,19 @@
-"""Gold signal bot V2.7 — multi-strategy, 24-hour operation, no daily signal limit, Yahoo 1m quote lag fix.
+"""Gold signal bot V2.8 — /price /news /performance, DXY filter, S/R + lot size, Ichimoku + VWAP.
 
-V2.7 changes: no time gate (runs any hour, any day) and no daily signal limit
-(MAX_SIGNALS = 999, effectively unlimited). MIN_GAP_MINUTES = 45 remains so the
-same setup is not re-sent every 10 minutes. Gold market itself is closed on
-weekends, so weekend runs normally find no setup / stale data, but the bot
-no longer blocks them. Multi-strategy (V2.4 baseline + 8 more, each firing independently).
-
-Categories from 69-day backtest (2026-09-16 to 2026-11-24, GC=F M15, gold -18.6%):
+V2.8 changes (on top of V2.7: 24-hour operation, no daily signal limit):
+  - New Telegram commands: /price (live GC=F quote), /news (latest 5 gold/USD
+    headlines, on demand only — does not touch the 10-min auto news), /performance
+    (per-strategy WIN/LOSS from state.json history).
+  - DXY filter: DXY (^DX-Y.NYB / DX=F, 1h) rising strongly only WARNS on BUY
+    signals ("DXY শক্তিশালী — BUY সাবধানে"); it never blocks a Strong signal.
+  - Support/Resistance: H1 last-50-candle high/low shown in every signal.
+  - Lot size: SL distance + lot size for $10 / $20 / $50 risk (0.01 lot = $1 per $1 move).
+  - New strategies (both WEAK until proven otherwise): Ichimoku TK-cross + VWAP cross.
+    Backtest 2026-09-16..2026-11-24, GC=F M15, 2R target, 96-bar expiry:
+    Ichimoku 26 signals, 5W/21L, -11.0R; VWAP 85 signals, 33W/52L, +14.0R.
+    VWAP's +14R comes from one strong downtrend window with no spread/slippage
+    modelled, so it stays Weak — one window is not proof.
+  - V2.7 categories from 69-day backtest (2026-09-16 to 2026-11-24, GC=F M15, gold -18.6%):
   STRONG: EMA Pullback baseline +6.0R (27 signals); ADX(14)>25 subset +10.0R (11 signals).
   MEDIUM: Stochastic +1.0R (62), Fibonacci+trend +1.0R (68) — breakeven before spread.
   WEAK (lost money in backtest — trade only as information, with care):
@@ -38,9 +45,12 @@ LOOKBACK_CANDLES = 4  # V2.3: also check the last 4 closed M15 candles (~60 min)
 # V2.7 multi-strategy categories (backtest 2026-09-16..2026-11-24, 69 days, gold -18.6%).
 CATEGORY_LABEL = {"strong": "🟢 শক্তিশালী", "medium": "🟡 মাঝারি", "weak": "🔴 দুর্বল"}
 # Backtest total R per strategy, shown as a warning for Weak strategies.
+# V2.8: Ichimoku / VWAP values are filled in from the V2.8 backtest (same
+# 2026-09-16..2026-11-24 GC=F M15 window as V2.5).
 STRATEGY_BACKTEST_R = {
     "EMA Pullback": 6.0, "Stochastic": 1.0, "Fibonacci": 1.0, "MACD": -8.0,
     "Bollinger": -17.1, "Breakout": -9.7, "Engulfing": -11.0, "RSI Divergence": -22.2,
+    "Ichimoku": -11.0, "VWAP": 14.0,
 }
 CAL_URLS = ["https://nfs.faireconomy.media/ff_calendar_thisweek.json", "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]
 CALENDAR_CACHE = Path("calendar_cache.json")
@@ -143,6 +153,27 @@ def market_data(interval, period):
     frame["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
     frame["plus_di"] = plus_di
     frame["minus_di"] = minus_di
+    # V2.8: Ichimoku (9/26/52). Senkou values here are computed from past data
+    # at the same bar (not shifted 26 forward) so the signal is lookahead-free.
+    high9 = frame["High"].rolling(9).max()
+    low9 = frame["Low"].rolling(9).min()
+    frame["tenkan"] = (high9 + low9) / 2
+    high26 = frame["High"].rolling(26).max()
+    low26 = frame["Low"].rolling(26).min()
+    frame["kijun"] = (high26 + low26) / 2
+    high52 = frame["High"].rolling(52).max()
+    low52 = frame["Low"].rolling(52).min()
+    frame["senkou_b"] = (high52 + low52) / 2
+    frame["senkou_a"] = (frame["tenkan"] + frame["kijun"]) / 2
+    # V2.8: intraday VWAP, reset each UTC day. Typical price weighted by volume;
+    # if volume is missing/zero, fall back to equal weighting (count).
+    typical = (frame["High"] + frame["Low"] + frame["Close"]) / 3
+    vol = frame["Volume"].fillna(0) if "Volume" in frame else pd.Series(0.0, index=frame.index)
+    vol = vol.where(vol > 0, 1.0)
+    day = frame.index.date
+    frame["vwap"] = (
+        (typical * vol).groupby(day).cumsum() / vol.groupby(day).cumsum()
+    )
     return frame
 
 
@@ -540,8 +571,128 @@ def rsi_divergence_signal(m15, h1, offset=0):
     return make_candidate(side, price, atr, current, previous, "RSI Divergence", "weak")
 
 
+def ichimoku_signal(m15, h1, offset=0):
+    """V2.8 WEAK: Ichimoku Tenkan/Kijun cross — a true event (not a persistent
+    state, so it does not re-fire on every candle while price sits above the
+    cloud). BUY: Tenkan crosses above Kijun, price above cloud, Chikou
+    (today's close vs price 26 bars ago) confirming, H1 trend aligned. SELL
+    is the mirror image."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    for col in ("tenkan", "kijun", "senkou_a", "senkou_b"):
+        if col not in current or pd.isna(current[col]) or pd.isna(previous[col]):
+            return None, "Ichimoku not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    cloud_top = max(float(current["senkou_a"]), float(current["senkou_b"]))
+    cloud_bot = min(float(current["senkou_a"]), float(current["senkou_b"]))
+    # Chikou span: today's close vs the price 26 bars ago.
+    idx = m15.index.get_loc(current.name)
+    if idx < 27:
+        return None, "Ichimoku not ready"
+    price_26_ago = float(m15["Close"].iloc[idx - 26])
+    cross_up = (float(previous["tenkan"]) <= float(previous["kijun"])
+                and float(current["tenkan"]) > float(current["kijun"]))
+    cross_down = (float(previous["tenkan"]) >= float(previous["kijun"])
+                  and float(current["tenkan"]) < float(current["kijun"]))
+    side = None
+    if (cross_up and price > cloud_top and price > price_26_ago
+            and price > float(current["Open"])
+            and _trend_ok(current, higher, "BUY")):
+        side = "BUY"
+    elif (cross_down and price < cloud_bot and price < price_26_ago
+            and price < float(current["Open"])
+            and _trend_ok(current, higher, "SELL")):
+        side = "SELL"
+    if side is None:
+        return None, "no Ichimoku TK cross with cloud"
+    return make_candidate(side, price, atr, current, previous, "Ichimoku", "weak")
+
+
+def vwap_signal(m15, h1, offset=0):
+    """V2.8 WEAK: VWAP cross — close crosses the intraday VWAP with EMA trend
+    alignment. VWAP is a mean level, so this is a mean-reversion-flavoured
+    signal and is kept Weak until its backtest proves otherwise."""
+    current, previous, higher, reason = _rows(m15, h1, offset)
+    if current is None:
+        return None, reason
+    if "vwap" not in current or pd.isna(current["vwap"]) or pd.isna(previous["vwap"]):
+        return None, "VWAP not ready"
+    price = float(current["Close"])
+    atr = float(current["atr"])
+    if not pd.notna(atr) or atr <= 0:
+        return None, "indicator not ready"
+    side = None
+    if (float(previous["Close"]) <= float(previous["vwap"]) and price > float(current["vwap"])
+            and price > float(current["Open"]) and _trend_ok(current, higher, "BUY")):
+        side = "BUY"
+    elif (float(previous["Close"]) >= float(previous["vwap"]) and price < float(current["vwap"])
+            and price < float(current["Open"]) and _trend_ok(current, higher, "SELL")):
+        side = "SELL"
+    if side is None:
+        return None, "no VWAP cross"
+    return make_candidate(side, price, atr, current, previous, "VWAP", "weak")
+
+
+def dxy_status():
+    """V2.8: Dollar Index (DXY) 1h trend. Fail-open: returns None when Yahoo
+    has no DXY data, so a missing DXY feed never blocks a signal.
+    Returns dict(value, change_1h_pct, rising_strongly) or None."""
+    # DX-Y.NYB (no caret) works on Yahoo; DX=F / ^DX-Y.NYB returned no data
+    # in testing, UUP (dollar ETF) is a last-resort proxy.
+    for symbol in ("DX-Y.NYB", "UUP", "DX=F", "^DX-Y.NYB"):
+        try:
+            frame = yf.download(symbol, period="5d", interval="1h", progress=False,
+                                auto_adjust=False, threads=False)
+            if frame is None or frame.empty:
+                continue
+            if isinstance(frame.columns, pd.MultiIndex):
+                frame.columns = frame.columns.get_level_values(0)
+            close = frame["Close"].dropna()
+            if len(close) < 25:
+                continue
+            ema20 = close.ewm(span=20, adjust=False).mean()
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2])
+            change = (last / prev - 1) * 100 if prev else 0.0
+            rising = bool(change > 0.05 and last > float(ema20.iloc[-1]))
+            return {"symbol": symbol, "value": last, "change_1h_pct": change,
+                    "rising_strongly": rising}
+        except Exception as exc:
+            print(f"DXY fetch failed ({symbol}): {exc}")
+            continue
+    return None
+
+
+def support_resistance(h1):
+    """V2.8: support = lowest low of last 50 H1 candles, resistance = highest
+    high of last 50 H1 candles. Returns (support, resistance) or (None, None)."""
+    if h1 is None or len(h1) < 50:
+        return None, None
+    tail = h1.iloc[-50:]
+    return float(tail["Low"].min()), float(tail["High"].max())
+
+
+def lot_size_text(risk_points):
+    """V2.8: lot size for $10 / $20 / $50 risk. Gold 0.01 lot = 1 oz, so $1 move
+    = $1 per 0.01 lot, i.e. $100 per 1.00 lot per $1 move. Demo only — broker
+    contract sizes differ, so verify on your own broker before trading live."""
+    if not risk_points or risk_points <= 0:
+        return ""
+    parts = []
+    for dollars in (10, 20, 50):
+        lots = dollars / (risk_points * 100.0)
+        lots = max(0.01, min(2.00, round(lots, 2)))
+        parts.append(f"${dollars} রিস্ক → {lots:.2f} lot")
+    return " | ".join(parts)
+
+
 # V2.7 priority order: Strong -> Medium -> Weak. If several match one candle,
-# the strongest category wins (checked first).
+# the strongest category wins (checked first). V2.8: Ichimoku + VWAP are Weak,
+# so they are checked last and never override a Strong/Medium signal.
 STRATEGY_FUNCTIONS = [
     build_signal,        # STRONG: EMA Pullback (V2.7 baseline)
     stochastic_signal,   # MEDIUM
@@ -551,6 +702,8 @@ STRATEGY_FUNCTIONS = [
     breakout_signal,     # WEAK
     engulfing_signal,    # WEAK
     rsi_divergence_signal,  # WEAK
+    ichimoku_signal,     # V2.8 WEAK
+    vwap_signal,         # V2.8 WEAK
 ]
 
 def validate_live_entry(candidate):
@@ -647,6 +800,125 @@ def is_today_bd(iso_time, today):
         return value.astimezone(BD).strftime("%Y-%m-%d") == today
     except (TypeError, ValueError):
         return False
+
+
+def price_command():
+    """V2.8 /price: live GC=F 1m quote + change vs previous daily close."""
+    quote = yf.download(SYMBOL, period="1d", interval="1m", progress=False,
+                        auto_adjust=False, threads=False)
+    if quote is None or quote.empty:
+        send("🥇 GOLD PRICE\nলাইভ দাম পাওয়া যায়নি — Yahoo ফিড চেক করো।")
+        return
+    if isinstance(quote.columns, pd.MultiIndex):
+        quote.columns = quote.columns.get_level_values(0)
+    quote = quote.dropna(subset=["Close"])
+    stamp = pd.Timestamp(quote.index[-1])
+    stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+    price = float(quote["Close"].iloc[-1])
+    age = (pd.Timestamp.now(tz="UTC") - stamp).total_seconds()
+    change_txt = ""
+    try:
+        daily = yf.download(SYMBOL, period="5d", interval="1d", progress=False,
+                            auto_adjust=False, threads=False)
+        if daily is not None and not daily.empty:
+            if isinstance(daily.columns, pd.MultiIndex):
+                daily.columns = daily.columns.get_level_values(0)
+            prev_close = float(daily["Close"].dropna().iloc[-2])
+            change_txt = f"\nগতকালের ক্লোজ থেকে: {(price / prev_close - 1) * 100:+.2f}%"
+    except Exception as exc:
+        print("Price change unavailable:", exc)
+    bd_stamp = stamp.astimezone(BD).strftime("%d %b, %I:%M %p")
+    send(
+        f"🥇 GOLD PRICE — {bd_stamp} (বাংলাদেশ)\n"
+        f"দাম: {price:.2f}{change_txt}\n"
+        f"কোটের বয়স: {age:.0f}s\n"
+        "Yahoo GC=F futures proxy; spot XAU/USD নয়, delayed হতে পারে।"
+    )
+
+
+def news_command():
+    """V2.8 /news: latest 5 relevant gold/USD headlines on demand.
+    Reads the feeds directly and does NOT mark anything seen, so the 10-min
+    auto news (news.py) is not disturbed and headlines are not spammed."""
+    from news import NEWS_FEEDS, fetch_feed, is_relevant, classify_impact, bd_time
+    items = []
+    for source, url in NEWS_FEEDS:
+        try:
+            items.extend(fetch_feed(source, url))
+        except Exception as exc:
+            print(f"News feed failed ({source}): {exc}")
+    if not items:
+        send("📰 GOLD / USD NEWS\nএই মুহূর্তে কোনো নিউজ ফিড থেকে খবর পাওয়া যায়নি।")
+        return
+    seen_links, picked = set(), []
+    # Gold/USD feed first (Fed/BLS feeds also carry admin headlines that pass
+    # the relevance filter); newest first within each feed.
+    ordered = sorted(
+        items,
+        key=lambda x: (x["source"] != "Gold / USD market news", -x["published"].timestamp()),
+    )
+    for item in ordered:
+        if not is_relevant(item["title"], item["description"]):
+            continue
+        link = (item["link"] or "").strip()
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+        picked.append(item)
+        if len(picked) >= 5:
+            break
+    if not picked:
+        send("📰 GOLD / USD NEWS\nসাম্প্রতিক প্রাসঙ্গিক কোনো শিরোনাম পাওয়া যায়নি।")
+        return
+    lines = ["📰 GOLD / USD NEWS — সর্বশেষ ৫টি\n"]
+    for item in picked:
+        impact, marker = classify_impact(item["title"], item["description"])
+        lines.append(
+            f"{marker} {item['title']}\n"
+            f"🕒 {bd_time(item['published'])} | উৎস: {item['source']}\n"
+            f"🔗 {item['link']}\n"
+        )
+    lines.append("⚠️ শিরোনাম মানেই দামের দিক নয়; এটি BUY/SELL সিগন্যাল নয়।")
+    send("\n".join(lines))
+
+
+def performance_command():
+    """V2.8 /performance: per-strategy WIN/LOSS/TIMEOUT + win-rate from
+    state.json history (last 300 closed trades) plus open trades."""
+    state = load_state()
+    trades = state.get("history", []) + state.get("open", [])
+    if not trades:
+        send("📊 PERFORMANCE\nএখনো কোনো বন্ধ বা চলমান ট্রেডের হিসাব নেই।")
+        return
+    by_strategy = {}
+    for trade in trades:
+        name = trade.get("strategy", "Unknown")
+        bucket = by_strategy.setdefault(name, {"WIN": 0, "LOSS": 0, "TIMEOUT": 0,
+                                               "AMBIGUOUS": 0, "OPEN": 0})
+        result = trade.get("result")
+        if result in bucket:
+            bucket[result] += 1
+        else:
+            bucket["OPEN"] += 1
+    lines = ["📊 PERFORMANCE — স্ট্র্যাটেজি অনুযায়ী (সর্বশেষ ৩০০ ট্রেড)\n"]
+    total_wins = total_losses = 0
+    for name in sorted(by_strategy, key=lambda n: -by_strategy[n]["WIN"]):
+        b = by_strategy[name]
+        decided = b["WIN"] + b["LOSS"]
+        win_rate = (b["WIN"] / decided * 100) if decided else 0.0
+        total_wins += b["WIN"]
+        total_losses += b["LOSS"]
+        lines.append(
+            f"{name}: WIN {b['WIN']} | LOSS {b['LOSS']} | Timeout {b['TIMEOUT']} | "
+            f"চলমান {b['OPEN']} | Win rate {win_rate:.0f}%"
+        )
+    total_decided = total_wins + total_losses
+    overall = (total_wins / total_decided * 100) if total_decided else 0.0
+    lines.append(
+        f"\nমোট: WIN {total_wins} | LOSS {total_losses} | Win rate {overall:.0f}%\n"
+        "ফলাফল candle-based আনুমানিক হিসাব; spread/slippage অন্তর্ভুক্ত নয়।"
+    )
+    send("\n".join(lines))
 
 
 def send_daily_report(state, today, signal_count=None):
@@ -762,16 +1034,38 @@ def main(manual=False):
     weak_note = ""
     if candidate.get("category") == "weak":
         br = STRATEGY_BACKTEST_R.get(strat, 0)
-        weak_note = (f"⚠️ ব্যাকটেস্টে লস করেছে (৬৯ দিনে {br}R), সাবধানে ট্রেড করো।\n")
+        if br < 0:
+            weak_note = (f"⚠️ ব্যাকটেস্টে লস করেছে (৬৯ দিনে {br}R), সাবধানে ট্রেড করো।\n")
+        else:
+            weak_note = (f"⚠️ নতুন স্ট্র্যাটেজি — ব্যাকটেস্টে {br}R হলেও মাত্র একটা "
+                         "ডাউনট্রেন্ড উইন্ডোর ফল, সাবধানে ট্রেড করো।\n")
+    # V2.8: DXY filter (warn only, never blocks a Strong signal) + S/R + lot size.
+    dxy = dxy_status()
+    dxy_note = ""
+    if dxy is not None:
+        dxy_note = f"DXY: {dxy['value']:.2f} ({dxy['change_1h_pct']:+.2f}% 1h)\n"
+        if candidate["side"] == "BUY" and dxy["rising_strongly"]:
+            dxy_note += "⚠️ DXY শক্তিশালী — BUY সাবধানে (ডলার শক্ত হলে সোনায় চাপ পড়ে)।\n"
+    elif dxy is None:
+        dxy_note = "DXY: তথ্য পাওয়া যায়নি (ফিল্টার প্রয়োগ হয়নি)।\n"
+    sup, res = support_resistance(h1)
+    sr_note = ""
+    if sup is not None and res is not None:
+        sr_note = f"সাপোর্ট: {sup:.2f} | রেজিস্ট্যান্স: {res:.2f} (H1 শেষ ৫০ candle)\n"
+    lot_note = lot_size_text(sl_points)
     message = (
-        f"🥇 GOLD {candidate['side']} — V2.7\n"
+        f"🥇 GOLD {candidate['side']} — V2.8\n"
         f"{cat_label} — {strat}{star}\n"
         f"{weak_note}"
         f"Entry: {candidate['entry']:.2f} (live quote)\n"
         f"Stop Loss: {candidate['sl']:.2f}\n"
         f"Take Profit: {candidate['tp']:.2f}\n"
         f"SL দূরত্ব: {sl_points:.2f} pts | TP দূরত্ব: {tp_points:.2f} pts\n"
+        f"{sr_note}"
+        f"{dxy_note}"
+        f"Lot size (0.01 lot = $1 per $1 move): {lot_note}\n"
         "MT5-তে নিজের স্পট দামের সাথে এই দূরত্ব বসান; উপরের সংখ্যা হুবহু কপি করবেন না (ফিউচার ≠ স্পট)।\n"
+        "⚠️ লট সাইজ শুধু উদাহরণ — আগে demo-তে যাচাই করো, ব্রোকারের কন্ট্রাক্ট সাইজ ভিন্ন হতে পারে।\n"
         f"Risk/Reward: 1:{REWARD_RISK:.1f}\n"
         f"Setup score: {candidate['score']}/100 | RSI: {candidate['rsi']:.1f}\n"
         f"Live quote: {candidate['quote_time']} | Drift: {candidate['drift']:.2f}\n"
@@ -800,6 +1094,12 @@ if __name__ == "__main__":
             raise SystemExit("Missing command after --command")
         if command == "signal":
             main(manual=True)
+        elif command == "price":
+            price_command()
+        elif command == "news":
+            news_command()
+        elif command == "performance":
+            performance_command()
         elif command in {"calendar", "forecast", "analysis"}:
             from reports import run_report
             run_report(command)
